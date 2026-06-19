@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+apps/*/node_modules
+packages/*/node_modules
+dist
+apps/mobile/dist
+apps/mobile/.expo
+apps/desktop/release
+apps/desktop/release-build
+backups
+*.log
+*.tsbuildinfo

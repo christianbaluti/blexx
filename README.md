@@ -116,3 +116,22 @@ apps/desktop/release/
 ```
 
 It creates a normal Windows application with a Start Menu shortcut, desktop shortcut, and Blex app icon.
+
+## Backend Container Deployment
+
+The API can be deployed from `Dockerfile.api` on container hosts.
+
+Required environment variables:
+
+```text
+DATABASE_URL=postgres://USER:PASSWORD@HOST:5432/DB_NAME
+JWT_SECRET=use-a-long-random-secret
+API_PORT=4000
+```
+
+Run migrations and seed data once after creating the cloud database:
+
+```bash
+npm run db:migrate
+npm run db:seed
+```
