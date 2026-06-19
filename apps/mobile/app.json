@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Blex Commerce OS",
+    "slug": "blex-commerce-os",
+    "scheme": "blex",
+    "version": "1.0.0",
+    "orientation": "default",
+    "userInterfaceStyle": "light",
+    "icon": "./assets/brand/app-icon.png",
+    "splash": {
+      "image": "./assets/brand/splash-logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#F8F3E8"
+    },
+    "platforms": ["ios", "android", "web"],
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.blex.commerceos"
+    },
+    "android": {
+      "package": "com.blex.commerceos",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/brand/adaptive-icon.png",
+        "backgroundColor": "#F7F3EC"
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/brand/app-icon.png"
+    },
+    "plugins": ["expo-router"]
+  }
+}

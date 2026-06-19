@@ -14,7 +14,16 @@ dist-ssr
 .vinxi
 .tanstack/**
 .nitro
+.expo/
+apps/mobile/.expo/
+apps/desktop/release/
+apps/desktop/release-build/
+backups/
+*.tsbuildinfo
 *.local
+.env
+.env.*
+!.env.example
 
 # Wrangler / Cloudflare
 .wrangler/

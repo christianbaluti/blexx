@@ -1,0 +1,44 @@
+{
+  "name": "@blex/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ModernTech Commerce OS desktop shell.",
+  "author": "ModernTech",
+  "main": "main.cjs",
+  "scripts": {
+    "dev": "electron .",
+    "build": "electron-builder --win nsis",
+    "build:dir": "electron-builder --win --dir",
+    "typecheck": "node -e \"console.log('desktop shell has no TypeScript sources')\""
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.moderntech.commerceos.desktop",
+    "productName": "ModernTech Commerce OS",
+    "files": [
+      "main.cjs",
+      "package.json",
+      "assets/**/*",
+      "../mobile/dist/**/*"
+    ],
+    "directories": {
+      "output": "release-build"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ModernTech Commerce OS"
+    }
+  }
+}
