@@ -11,16 +11,16 @@ Cross-platform commerce app rebuilt as:
 ## Requirements
 
 - Node.js 20+
-- npm 10+
+- pnpm 11+ (`corepack enable` if pnpm is not already installed)
 - PostgreSQL 15+ or Docker Desktop
 
 ## Setup
 
 ```bash
-npm install
+pnpm install
 cp .env.example .env
-npm run db:up
-npm run db:setup
+pnpm run db:up
+pnpm run db:setup
 ```
 
 If you are using PowerShell instead of Git Bash, copy the environment file with:
@@ -48,16 +48,16 @@ DATABASE_URL=postgres://postgres:YOUR_PASSWORD@localhost:5432/blex
 Then run:
 
 ```bash
-npm run db:create
-npm run db:check
-npm run db:migrate
-npm run db:seed
+pnpm run db:create
+pnpm run db:check
+pnpm run db:migrate
+pnpm run db:seed
 ```
 
 Or run the create, migrate, and seed steps together:
 
 ```bash
-npm run db:setup
+pnpm run db:setup
 ```
 
 The seed user is:
@@ -72,13 +72,19 @@ password: admin
 Run the backend:
 
 ```bash
-npm run dev:api
+pnpm run dev:api
 ```
 
 Run the React Native app:
 
 ```bash
-npm run dev:mobile
+pnpm run dev:mobile
+```
+
+Launch directly in the iOS Simulator:
+
+```bash
+pnpm --filter @blex/mobile run ios
 ```
 
 Expo can open the same app on iOS, Android, and web.
@@ -86,19 +92,19 @@ Expo can open the same app on iOS, Android, and web.
 Run web only:
 
 ```bash
-npm run dev:web
+pnpm run dev:web
 ```
 
 Run the Windows desktop wrapper while the web app is running:
 
 ```bash
-npm run dev:desktop
+pnpm run dev:desktop
 ```
 
 ## Build
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 This compiles shared code, the Fastify API, exports the React Native web app, and packages the Windows desktop app.
@@ -106,7 +112,7 @@ This compiles shared code, the Fastify API, exports the React Native web app, an
 Build only the Windows desktop installer:
 
 ```bash
-npm run build:desktop:installer
+pnpm run build:desktop:installer
 ```
 
 The installer is written to:
@@ -132,6 +138,34 @@ API_PORT=4000
 Run migrations and seed data once after creating the cloud database:
 
 ```bash
-npm run db:migrate
-npm run db:seed
+pnpm run db:migrate
+pnpm run db:seed
+```
+
+## Free Backend Deployment
+
+Recommended free setup:
+
+- Host the Fastify API on Vercel using the root `api/index.ts` serverless entry and `vercel.json`.
+- Host PostgreSQL on Neon free tier, then put the Neon pooled connection string in `DATABASE_URL`.
+
+Vercel environment variables:
+
+```text
+DATABASE_URL=postgres://USER:PASSWORD@HOST/DB_NAME?sslmode=require
+JWT_SECRET=use-a-long-random-secret
+API_PORT=4000
+```
+
+After the Vercel project is linked to this repository and the Neon database exists, run migrations once against the cloud database:
+
+```bash
+DATABASE_URL="postgres://USER:PASSWORD@HOST/DB_NAME?sslmode=require" pnpm run db:migrate
+DATABASE_URL="postgres://USER:PASSWORD@HOST/DB_NAME?sslmode=require" pnpm run db:seed
+```
+
+Point mobile builds at the deployed API:
+
+```bash
+EXPO_PUBLIC_API_URL=https://YOUR-VERCEL-PROJECT.vercel.app pnpm --filter @blex/mobile run ios
 ```
