@@ -1,6 +1,7 @@
 {
   "installCommand": "pnpm install --frozen-lockfile",
-  "buildCommand": "pnpm run build:shared && pnpm --filter @blex/api run build",
+  "buildCommand": "pnpm run build:shared && pnpm --filter @blex/api run build && mkdir -p public",
+  "outputDirectory": "public",
   "rewrites": [
     { "source": "/", "destination": "/api" },
     { "source": "/:path*", "destination": "/api/:path*" }
