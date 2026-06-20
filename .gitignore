@@ -40,3 +40,4 @@ backups/
 *.njsproj
 *.sln
 *.sw?
+.vercel
