@@ -38,6 +38,7 @@ import { readCacheAsync, saveCache } from "./localDb";
 import { getAuthToken } from "./sessionStore";
 
 const API_PORT = "4000";
+const PRODUCTION_API_URL = "https://blexx-api-ms2z.vercel.app";
 
 function cleanUrl(url: string) {
   return url.replace(/\/+$/, "");
@@ -67,7 +68,8 @@ export function getApiUrl() {
   const expoHost = hostFromExpo();
   if (expoHost) return `http://${expoHost}:${API_PORT}`;
 
-  return "http://localhost:4000";
+  if (typeof __DEV__ !== "undefined" && __DEV__) return "http://localhost:4000";
+  return PRODUCTION_API_URL;
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -84,7 +86,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       headers
     });
   } catch {
-    throw new Error(`Cannot reach Blex API at ${apiUrl}. Make sure the backend is running and your phone is on the same Wi-Fi.`);
+    throw new Error(`Cannot reach Blex API at ${apiUrl}. Check your connection and backend status.`);
   }
 
   if (!response.ok) {

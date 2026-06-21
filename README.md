@@ -169,3 +169,11 @@ Point mobile builds at the deployed API:
 ```bash
 EXPO_PUBLIC_API_URL=https://YOUR-VERCEL-PROJECT.vercel.app pnpm --filter @blex/mobile run ios
 ```
+
+This repository defaults production mobile builds to:
+
+```text
+https://blexx-api-ms2z.vercel.app
+```
+
+Set `EXPO_PUBLIC_API_URL` only when you need to point a build at another backend.
