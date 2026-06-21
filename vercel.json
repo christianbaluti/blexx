@@ -5,6 +5,7 @@
   "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
   "functions": {
     "api/index.js": {
+      "includeFiles": "db/postgres/**/*.sql",
       "maxDuration": 30
     }
   }
