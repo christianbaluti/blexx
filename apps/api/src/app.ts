@@ -6,7 +6,6 @@ import { config } from "./config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCommerceRoutes } from "./routes/commerce.js";
 import { registerModuleRoutes } from "./routes/modules.js";
-import { registerSetupRoute } from "./setup-db.js";
 
 export async function createApp() {
   const app = Fastify({
@@ -20,7 +19,6 @@ export async function createApp() {
 
   app.get("/health", async () => ({ ok: true, service: "blex-api" }));
 
-  await registerSetupRoute(app);
   await registerAuthRoutes(app);
   await registerCommerceRoutes(app);
   await registerModuleRoutes(app);
