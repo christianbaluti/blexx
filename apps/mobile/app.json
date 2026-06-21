@@ -20,7 +20,10 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.blex.commerceos"
+      "bundleIdentifier": "com.blex.commerceos",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.blex.commerceos",
