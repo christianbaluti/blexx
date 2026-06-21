@@ -91,7 +91,7 @@ export const quickCreate = {
     <QuickCreate label="New customer" title="New customer" queryKey="customers" fields={[{ key: "name", label: "Name" }, { key: "phone", label: "Phone" }, { key: "email", label: "Email" }, { key: "creditLimit", label: "Credit limit", numeric: true }]} submit={api.createCustomer} />
   ),
   user: () => (
-    <QuickCreate label="New user" title="New user" queryKey="users" fields={[{ key: "username", label: "Username" }, { key: "email", label: "Email" }, { key: "name", label: "Full name" }, { key: "password", label: "Password", defaultValue: "demo" }, { key: "role", label: "Role", defaultValue: "pos_cashier" }]} submit={api.createUser} />
+    <QuickCreate label="New user" title="New user" queryKey="users" fields={[{ key: "username", label: "Username" }, { key: "email", label: "Email" }, { key: "name", label: "Full name" }, { key: "password", label: "Password" }, { key: "role", label: "Role", defaultValue: "pos_cashier" }]} submit={api.createUser} />
   ),
   expense: (categoryId: string, outletId?: string) => (
     <QuickCreate label="New expense" title="New expense" queryKey="expenses" fields={[{ key: "description", label: "Description" }, { key: "amount", label: "Amount", numeric: true }, { key: "date", label: "Date", defaultValue: new Date().toISOString().slice(0, 10) }]} submit={(payload) => api.createExpense({ ...payload, categoryId, outletId: outletId ?? null, recurring: false })} />

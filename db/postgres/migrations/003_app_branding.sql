@@ -8,10 +8,12 @@ INSERT INTO app_settings (key, value)
 VALUES (
   'branding',
   jsonb_build_object(
-    'appName', 'ModernTech',
-    'appSubtitle', 'Commerce OS',
+    'appName', 'POS & Inventory +',
+    'appSubtitle', 'Sales, stock and operations',
     'logoDataUrl', null,
     'iconDataUrl', null
   )
 )
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = now();

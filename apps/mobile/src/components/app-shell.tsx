@@ -84,8 +84,8 @@ export function AppShell() {
             </Pressable>
           ) : null}
           <View style={styles.headerTitle}>
-            <Text style={styles.crumb}>ModernTech / {title}</Text>
-            <Text style={styles.user}>{auth.user?.name} working locally first</Text>
+            <Text style={styles.crumb}>POS & Inventory + / {title}</Text>
+            <Text style={styles.user}>{auth.user?.name}</Text>
           </View>
           {!isCompact ? (
             <View style={styles.searchBox}>

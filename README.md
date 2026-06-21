@@ -1,4 +1,4 @@
-# Blex Commerce OS
+# POS & Inventory +
 
 Cross-platform commerce app rebuilt as:
 

@@ -101,7 +101,7 @@ export default function Settings() {
         {tab === "company" ? (
           <Card style={styles.formCard}>
             <View style={styles.formGrid}>
-              <View style={styles.fieldBlock}><Text style={styles.label}>Trading name</Text><Field defaultValue="ModernTech Innovation" /></View>
+              <View style={styles.fieldBlock}><Text style={styles.label}>Trading name</Text><Field defaultValue="POS & Inventory +" /></View>
               <View style={styles.fieldBlock}><Text style={styles.label}>Currency</Text><Field defaultValue="MWK - Malawian Kwacha" /></View>
               <View style={styles.fieldBlock}><Text style={styles.label}>VAT rate (%)</Text><Field defaultValue="16.5" /></View>
               <View style={styles.fieldBlockWide}><Text style={styles.label}>Address</Text><Field defaultValue="Area 47, Lilongwe, Malawi" /></View>

@@ -7,7 +7,7 @@ export async function shareReceipt(input: { refNo: string; total: number; lines:
   const html = `
     <html>
       <body style="font-family: Arial; padding: 24px">
-        <h1>ModernTech Commerce OS</h1>
+        <h1>POS &amp; Inventory +</h1>
         <h2>Receipt ${input.refNo}</h2>
         <table style="width:100%; border-collapse: collapse">
           <thead><tr><th align="left">Product</th><th align="right">Qty</th><th align="right">Price</th></tr></thead>

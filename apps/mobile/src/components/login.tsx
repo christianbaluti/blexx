@@ -1,26 +1,16 @@
-import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { ActivityIndicator, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { BrandLockup, BrandMark } from "./brand";
 import { Button, Field, Screen } from "./ui";
 import { useAuth } from "../lib/auth";
 import { colors, typography } from "../lib/theme";
 
-const demoAccounts = [
-  { username: "admin", password: "admin", role: "Super Administrator" },
-  { username: "inventory", password: "demo", role: "Inventory Officer" },
-  { username: "production", password: "demo", role: "Production Officer" },
-  { username: "cashier", password: "demo", role: "POS Cashier" },
-  { username: "finance", password: "demo", role: "Finance User" },
-  { username: "cro", password: "demo", role: "Customer Relationship Officer" }
-];
-
 export function Login() {
   const auth = useAuth();
   const { width } = useWindowDimensions();
   const wide = width >= 940;
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -45,9 +35,9 @@ export function Login() {
               <BrandLockup inverse />
             </View>
             <View style={styles.brandStory}>
-              <Text style={styles.brandEyebrow}>v1 pilot release</Text>
-              <Text style={styles.brandHeadline}>One ledger for stock, sales and the shop floor.</Text>
-              <Text style={styles.brandCopy}>Inventory, production, POS, finance and customer relationships, built for how real shops move.</Text>
+              <Text style={styles.brandEyebrow}>production workspace</Text>
+              <Text style={styles.brandHeadline}>One system for selling, stock and operations.</Text>
+              <Text style={styles.brandCopy}>Run POS, inventory, purchasing, finance and reporting from a single connected workspace.</Text>
             </View>
             <View style={styles.brandStats}>
               <View><Text style={styles.statValue}>99.9%</Text><Text style={styles.statLabel}>uptime SLA</Text></View>
@@ -62,35 +52,16 @@ export function Login() {
             {!wide ? (
               <View style={styles.mobileBrand}>
                 <BrandMark size={48} />
-                <Text style={styles.mobileBrandText}>ModernTech</Text>
+                <Text style={styles.mobileBrandText}>POS & Inventory +</Text>
               </View>
             ) : null}
             <Text style={styles.formEyebrow}>Sign in</Text>
-            <Text style={styles.brand}>Open the shop</Text>
-            <Text style={styles.title}>Use your role credentials to continue.</Text>
+            <Text style={styles.brand}>Sign in to continue</Text>
+            <Text style={styles.title}>Use your assigned account credentials.</Text>
             <Field autoCapitalize="none" value={username} onChangeText={setUsername} placeholder="Username or email" />
             <Field secureTextEntry value={password} onChangeText={setPassword} placeholder="Password" />
             {error ? <Text style={styles.error}>{error}</Text> : null}
             <Button onPress={submit} disabled={busy}>{busy ? <ActivityIndicator color="#fff" /> : "Continue"}</Button>
-            <View style={styles.demoBox}>
-              <View style={styles.demoTitleRow}>
-                <MaterialCommunityIcons name="lock-outline" size={14} color={colors.muted} />
-                <Text style={styles.demoTitle}>Demo accounts</Text>
-              </View>
-              {demoAccounts.map((account) => (
-                <Pressable
-                  key={account.username}
-                  style={styles.demoRow}
-                  onPress={() => {
-                    setUsername(account.username);
-                    setPassword(account.password);
-                  }}
-                >
-                  <Text style={styles.demoUser}>{account.username}</Text>
-                  <Text style={styles.demoRole}>{account.role}</Text>
-                </Pressable>
-              ))}
-            </View>
           </View>
         </View>
       </View>
@@ -118,10 +89,5 @@ const styles = StyleSheet.create({
   brand: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 34 },
   title: { color: colors.muted, fontFamily: typography.sansRegular, fontSize: 14, marginBottom: 10 },
   error: { color: colors.danger, fontFamily: typography.sansBold },
-  demoBox: { gap: 4, borderWidth: 1, borderStyle: "dashed", borderColor: colors.line, borderRadius: 7, backgroundColor: "rgba(255,255,255,0.55)", padding: 10, marginTop: 8 },
-  demoTitleRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 },
-  demoTitle: { color: colors.muted, fontFamily: typography.sansBlack, fontSize: 10, textTransform: "uppercase" },
-  demoRow: { minHeight: 30, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, borderRadius: 5, paddingHorizontal: 6 },
-  demoUser: { color: colors.accent, fontFamily: typography.monoMedium, fontSize: 12 },
-  demoRole: { color: colors.muted, flex: 1, textAlign: "right", fontFamily: typography.sansMedium, fontSize: 11 }
+  formFooter: { color: colors.muted, fontFamily: typography.sansMedium, fontSize: 11, textAlign: "center" }
 });

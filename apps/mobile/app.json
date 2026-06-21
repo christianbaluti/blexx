@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "Blex Commerce OS",
-    "slug": "blex-commerce-os",
+    "name": "POS & Inventory +",
+    "slug": "pos-inventory-plus",
     "scheme": "blex",
     "version": "1.0.0",
     "orientation": "default",

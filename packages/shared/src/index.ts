@@ -331,8 +331,8 @@ export interface AppBranding {
 }
 
 export const defaultAppBranding: AppBranding = {
-  appName: "ModernTech",
-  appSubtitle: "Commerce OS",
+  appName: "POS & Inventory +",
+  appSubtitle: "Sales, stock and operations",
   logoDataUrl: null,
   iconDataUrl: null,
   logoUpdatedAt: null
