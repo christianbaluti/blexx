@@ -2,6 +2,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router, Slot, usePathname } from "expo-router";
 import { useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BrandLockup, StartupScreen } from "./brand";
 import { useAuth } from "../lib/auth";
 import { useSyncEngine } from "../lib/syncEngine";
@@ -60,7 +61,9 @@ const routeTitles = Object.fromEntries(
 
 export function AppShell() {
   const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const isCompact = width < 820;
+  const compactTopInset = isCompact ? Math.max(insets.top, 54) : 0;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const auth = useAuth();
   const sync = useSyncEngine();
@@ -77,15 +80,15 @@ export function AppShell() {
     <View style={styles.root}>
       {!isCompact ? <View style={styles.sidebar}>{nav}</View> : null}
       <View style={styles.main}>
-        <View style={styles.header}>
+        <View style={[styles.header, isCompact && { minHeight: 62 + compactTopInset, paddingTop: compactTopInset }]}>
           {isCompact ? (
             <Pressable style={styles.iconButton} onPress={() => setDrawerOpen(true)}>
               <MaterialCommunityIcons name="menu" size={22} color={colors.ink} />
             </Pressable>
           ) : null}
           <View style={styles.headerTitle}>
-            <Text style={styles.crumb}>POS & Inventory + / {title}</Text>
-            <Text style={styles.user}>{auth.user?.name}</Text>
+            <Text style={styles.crumb} numberOfLines={1}>POS & Inventory + / {title}</Text>
+            <Text style={styles.user} numberOfLines={1}>{auth.user?.name}</Text>
           </View>
           {!isCompact ? (
             <View style={styles.searchBox}>
@@ -163,7 +166,7 @@ function SyncPill({ status, pending, conflicts }: { status: string; pending: num
   return (
     <View style={[styles.syncPill, { borderColor: tone }]}>
       <View style={[styles.syncDot, { backgroundColor: tone }]} />
-      <Text style={[styles.syncText, { color: tone }]}>{label}</Text>
+      <Text style={[styles.syncText, { color: tone }]} numberOfLines={1}>{label}</Text>
     </View>
   );
 }

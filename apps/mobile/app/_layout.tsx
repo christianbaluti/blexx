@@ -20,6 +20,7 @@ import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useState } from "react";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StartupScreen } from "../src/components/brand";
 import { AuthProvider } from "../src/lib/auth";
 import { BrandProvider } from "../src/lib/branding";
@@ -43,13 +44,15 @@ export default function RootLayout() {
   if (!fontsLoaded) return <StartupScreen label="Loading brand system" />;
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrandProvider>
-        <AuthProvider>
-          <StatusBar style="dark" />
-          <Stack screenOptions={{ headerShown: false }} />
-        </AuthProvider>
-      </BrandProvider>
-    </QueryClientProvider>
+    <SafeAreaProvider>
+      <QueryClientProvider client={queryClient}>
+        <BrandProvider>
+          <AuthProvider>
+            <StatusBar style="dark" />
+            <Stack screenOptions={{ headerShown: false }} />
+          </AuthProvider>
+        </BrandProvider>
+      </QueryClientProvider>
+    </SafeAreaProvider>
   );
 }
