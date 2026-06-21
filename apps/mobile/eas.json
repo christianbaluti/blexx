@@ -10,6 +10,7 @@
     },
     "preview": {
       "distribution": "internal",
+      "node": "22.13.1",
       "android": {
         "buildType": "apk"
       },
@@ -22,6 +23,7 @@
     },
     "production": {
       "autoIncrement": true,
+      "node": "22.13.1",
       "env": {
         "EXPO_PUBLIC_API_URL": "https://blexx-api-ms2z.vercel.app"
       }
