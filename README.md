@@ -177,3 +177,9 @@ https://blexx-api-ms2z.vercel.app
 ```
 
 Set `EXPO_PUBLIC_API_URL` only when you need to point a build at another backend.
+
+For local backend development with Expo Go, opt in explicitly:
+
+```bash
+EXPO_PUBLIC_USE_LOCAL_API=true pnpm --filter @blex/mobile run ios
+```

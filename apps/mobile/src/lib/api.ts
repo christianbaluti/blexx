@@ -65,10 +65,13 @@ export function getApiUrl() {
   const configured = process.env.EXPO_PUBLIC_API_URL?.trim();
   if (configured) return cleanUrl(configured);
 
-  const expoHost = hostFromExpo();
-  if (expoHost) return `http://${expoHost}:${API_PORT}`;
+  const useLocalApi = process.env.EXPO_PUBLIC_USE_LOCAL_API === "true";
+  if (useLocalApi) {
+    const expoHost = hostFromExpo();
+    if (expoHost) return `http://${expoHost}:${API_PORT}`;
+    return "http://localhost:4000";
+  }
 
-  if (typeof __DEV__ !== "undefined" && __DEV__) return "http://localhost:4000";
   return PRODUCTION_API_URL;
 }
 
