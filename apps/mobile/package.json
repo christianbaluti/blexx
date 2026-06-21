@@ -9,6 +9,9 @@
     "ios": "expo start --ios --port 8081",
     "web": "expo start --web",
     "build:web": "expo export --platform web --output-dir dist",
+    "build:android:client": "eas build --platform android --profile preview",
+    "build:ios:client": "eas build --platform ios --profile preview",
+    "build:all:client": "eas build --platform all --profile preview",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
