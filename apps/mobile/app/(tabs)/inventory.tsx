@@ -17,6 +17,7 @@ export default function Inventory() {
   const [reason, setReason] = useState<"adjust" | "damage">("adjust");
   const [productId, setProductId] = useState("");
   const [outletId, setOutletId] = useState("");
+  const [stockOutletId, setStockOutletId] = useState("all");
   const [qty, setQty] = useState("");
   const [note, setNote] = useState("");
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products });
@@ -27,6 +28,8 @@ export default function Inventory() {
   const { data: transfers = [] } = useQuery({ queryKey: ["transfers"], queryFn: api.transfers });
   const { data: counts = [] } = useQuery({ queryKey: ["stock-counts"], queryFn: api.stockCounts });
   const lowStock = products.filter((product) => product.stock <= product.reorder);
+  const stockRows = inventory.filter((row) => stockOutletId === "all" || String(row.outletId) === stockOutletId);
+  const lowOutletStock = stockRows.filter((row) => Number(row.quantity ?? 0) <= Number(row.reorder ?? 0));
   const selectedProduct = products.find((product) => product.id === productId);
   const selectedOutlet = outlets.find((outlet) => String(outlet.id) === outletId);
 
@@ -90,26 +93,41 @@ export default function Inventory() {
 
         {tab === "stock" ? (
           <>
-            {lowStock.length ? (
+            {lowOutletStock.length ? (
               <AlertPanel
-                title={`${lowStock.length} SKU${lowStock.length > 1 ? "s" : ""} below reorder point`}
-                body={lowStock.map((product) => product.name).join(", ")}
+                title={`${lowOutletStock.length} stock row${lowOutletStock.length > 1 ? "s" : ""} below reorder point`}
+                body={lowOutletStock.map((row) => `${String(row.productName)} at ${String(row.outletName)}`).slice(0, 8).join(", ")}
               />
             ) : null}
-            <TableCard>
-              <TableHeader columns={["Item", "On hand", "Reorder", "Unit cost", "Value", "Status"]} />
-              {products.map((product) => {
-                const reorder = product.stock <= product.reorder;
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionRail}>
+              {[{ id: "all", name: "All warehouses and shops" }, ...outlets.map((outlet) => ({ id: String(outlet.id), name: String(outlet.name) }))].map((outlet) => {
+                const active = stockOutletId === outlet.id;
                 return (
-                  <View key={product.id} style={styles.row}>
+                  <Pressable key={outlet.id} style={[styles.optionChip, active && styles.optionChipActive]} onPress={() => setStockOutletId(outlet.id)}>
+                    <Text style={[styles.optionText, active && styles.optionTextActive]}>{outlet.name}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <TableCard>
+              <TableHeader columns={["Item", "Location", "On hand", "Reorder", "Unit cost", "Value", "Status"]} />
+              {stockRows.map((row) => {
+                const product = products.find((item) => item.id === row.productId);
+                const quantity = Number(row.quantity ?? 0);
+                const reorderQty = Number(row.reorder ?? product?.reorder ?? 0);
+                const cost = Number(row.cost ?? product?.cost ?? 0);
+                const reorder = quantity <= reorderQty;
+                return (
+                  <View key={`${String(row.productId)}-${String(row.outletId)}`} style={styles.row}>
                     <View style={styles.itemCell}>
-                      <Text style={styles.rowTitle}>{product.name}</Text>
-                      <Text style={styles.rowMeta}>{product.sku}</Text>
+                      <Text style={styles.rowTitle}>{String(row.productName)}</Text>
+                      <Text style={styles.rowMeta}>{String(row.sku)}</Text>
                     </View>
-                    <Text style={styles.rightCell}>{product.stock} {product.unit}</Text>
-                    <Text style={styles.rightMuted}>{product.reorder}</Text>
-                    <Text style={styles.rightCell}>{formatMwk(product.cost)}</Text>
-                    <Text style={styles.rightCell}>{formatMwk(product.cost * product.stock)}</Text>
+                    <Text style={styles.cellText}>{String(row.outletName)}</Text>
+                    <Text style={styles.rightCell}>{quantity} {String(row.unit ?? product?.unit ?? "")}</Text>
+                    <Text style={styles.rightMuted}>{reorderQty}</Text>
+                    <Text style={styles.rightCell}>{formatMwk(cost)}</Text>
+                    <Text style={styles.rightCell}>{formatMwk(cost * quantity)}</Text>
                     <View style={styles.cell}>
                       <Pressable onPress={() => openAdjustment(reorder ? "adjust" : "damage", product)}>
                         <Badge tone={reorder ? "danger" : "success"}>{reorder ? "Reorder" : "In stock"}</Badge>
@@ -189,7 +207,7 @@ export default function Inventory() {
           ) : <EmptyPanel icon="clipboard-check-outline" title="No physical counts yet" body="Run stock counts to reconcile system stock with shelf stock." action={<CommandButton icon="plus" label="New count" primary />} />
         ) : null}
 
-        {!inventory.length && tab === "stock" ? <Text style={styles.hint}>Outlet-level inventory is empty; product master stock is shown above.</Text> : null}
+        {!inventory.length && tab === "stock" && lowStock.length ? <Text style={styles.hint}>Outlet-level inventory is empty; product master stock is still available in Products.</Text> : null}
       </ScrollView>
 
       <Modal visible={adjustOpen} transparent animationType="fade" onRequestClose={() => setAdjustOpen(false)}>

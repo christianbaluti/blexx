@@ -23,6 +23,7 @@ export default function Pos() {
   const compact = width < 940;
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<string>("all");
+  const [compactPane, setCompactPane] = useState<"items" | "cart">("items");
   const [cart, setCart] = useState<CartLine[]>([]);
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products, enabled: auth.isAuthenticated });
   const { data: categories = [] } = useQuery({ queryKey: ["categories"], queryFn: api.categories, enabled: auth.isAuthenticated });
@@ -92,7 +93,9 @@ export default function Pos() {
         }
         return current.map((line) => line.product.id === product.id ? { ...line, qty: line.qty + 1 } : line);
       }
-      return [...current, { product, qty: 1 }];
+      const next = [...current, { product, qty: 1 }];
+      if (compact) setCompactPane("cart");
+      return next;
     });
   }
 
@@ -116,9 +119,9 @@ export default function Pos() {
             <Text style={styles.lane}>Lane 01</Text>
             <Text style={styles.cashier}>Cashier: {auth.user?.name}</Text>
           </View>
-          <Pressable style={styles.headerPill}>
+          <Pressable style={styles.headerPill} onPress={() => compact && setCompactPane(compactPane === "items" ? "cart" : "items")}>
             <MaterialCommunityIcons name="pause-circle-outline" size={17} color={colors.ink} />
-            <Text style={styles.headerPillText}>Held carts</Text>
+            <Text style={styles.headerPillText}>{compact ? `${cart.length} cart` : "Held carts"}</Text>
           </Pressable>
           <Pressable style={styles.holdButton} onPress={() => setCart([])}>
             <MaterialCommunityIcons name="content-save-outline" size={17} color="#FFF7EF" />
@@ -126,8 +129,21 @@ export default function Pos() {
           </Pressable>
         </View>
 
+        {compact ? (
+          <View style={styles.mobileTabs}>
+            <Pressable style={[styles.mobileTab, compactPane === "items" && styles.mobileTabActive]} onPress={() => setCompactPane("items")}>
+              <MaterialCommunityIcons name="tag-multiple-outline" size={16} color={compactPane === "items" ? "#FFF7EF" : colors.ink} />
+              <Text style={[styles.mobileTabText, compactPane === "items" && styles.mobileTabTextActive]}>Items</Text>
+            </Pressable>
+            <Pressable style={[styles.mobileTab, compactPane === "cart" && styles.mobileTabActive]} onPress={() => setCompactPane("cart")}>
+              <MaterialCommunityIcons name="cart-outline" size={16} color={compactPane === "cart" ? "#FFF7EF" : colors.ink} />
+              <Text style={[styles.mobileTabText, compactPane === "cart" && styles.mobileTabTextActive]}>Cart {cart.length}</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         <View style={[styles.body, compact && styles.bodyCompact]}>
-          <View style={[styles.catalogue, compact && styles.catalogueCompact]}>
+          {(!compact || compactPane === "items") ? <View style={[styles.catalogue, compact && styles.catalogueCompact]}>
             <View style={styles.catalogueTop}>
               <View>
                 <Text style={styles.eyebrow}>Catalogue</Text>
@@ -178,9 +194,9 @@ export default function Pos() {
               )}
               ListEmptyComponent={<Text style={styles.empty}>No matching sellable products.</Text>}
             />
-          </View>
+          </View> : null}
 
-          <View style={[styles.cart, compact && styles.cartCompact]}>
+          {(!compact || compactPane === "cart") ? <View style={[styles.cart, compact && styles.cartCompact]}>
             <View style={styles.cartHeader}>
               <View>
                 <Text style={styles.eyebrow}>Current sale</Text>
@@ -229,7 +245,7 @@ export default function Pos() {
               <Button variant="outline" onPress={() => checkout.mutate("card")} disabled={!cart.length || checkout.isPending}>Card</Button>
               <Button variant="outline" onPress={() => checkout.mutate("mobile")} disabled={!cart.length || checkout.isPending}>Mobile</Button>
             </View>
-          </View>
+          </View> : null}
         </View>
       </View>
     </Screen>
@@ -248,9 +264,14 @@ const styles = StyleSheet.create({
   holdButton: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 13, borderRadius: 7, backgroundColor: colors.accent },
   holdText: { color: "#FFF7EF", fontWeight: "900" },
   body: { flex: 1, flexDirection: "row", gap: 14, padding: 14 },
-  bodyCompact: { flexDirection: "column" },
+  bodyCompact: { flexDirection: "column", paddingTop: 8 },
+  mobileTabs: { flexDirection: "row", gap: 8, paddingHorizontal: 14, paddingTop: 10 },
+  mobileTab: { flex: 1, minHeight: 38, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, borderWidth: 1, borderColor: colors.line, borderRadius: 7, backgroundColor: colors.surface },
+  mobileTabActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  mobileTabText: { color: colors.ink, fontWeight: "900" },
+  mobileTabTextActive: { color: "#FFF7EF" },
   catalogue: { flex: 1, minWidth: 0, gap: 10 },
-  catalogueCompact: { minHeight: 520 },
+  catalogueCompact: { flex: 1, minHeight: 0 },
   catalogueTop: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
   eyebrow: { color: colors.accent, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
   title: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 28, fontWeight: "700" },
@@ -276,7 +297,7 @@ const styles = StyleSheet.create({
   tileStock: { color: colors.muted, fontSize: 11, fontWeight: "800" },
   lowStock: { color: colors.danger },
   cart: { width: 390, maxWidth: "42%", borderRadius: 7, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 14 },
-  cartCompact: { width: "100%", maxWidth: "100%", minHeight: 420 },
+  cartCompact: { width: "100%", maxWidth: "100%", flex: 1, minHeight: 0 },
   cartHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 12 },
   cartTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 24, fontWeight: "700", marginTop: 2 },
   clearButton: { width: 34, height: 34, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.line },

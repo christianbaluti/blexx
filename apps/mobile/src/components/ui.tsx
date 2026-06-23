@@ -1,9 +1,11 @@
 import { type ReactNode } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View, type PressableProps, type StyleProp, type TextInputProps, type ViewStyle } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, shadow, typography } from "../lib/theme";
 
 export function Screen({ children }: { children: ReactNode }) {
-  return <View style={styles.screen}>{children}</View>;
+  const insets = useSafeAreaInsets();
+  return <View style={[styles.screen, { paddingBottom: Math.max(insets.bottom, 8) }]}>{children}</View>;
 }
 
 export function Card({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {

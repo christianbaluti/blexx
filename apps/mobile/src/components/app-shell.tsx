@@ -74,8 +74,6 @@ export function AppShell() {
 
   if (auth.loading) return <StartupScreen label="Restoring your secure session" />;
   if (!auth.isAuthenticated) return <Slot />;
-  if (pathname === "/pos" || pathname.endsWith("/pos")) return <Slot />;
-
   const nav = <Navigation onNavigate={() => setDrawerOpen(false)} />;
   const title = routeTitles[pathname] ?? "Dashboard";
 

@@ -1,24 +1,148 @@
-import { Text, View } from "react-native";
-import { DataModuleScreen, OfflineActionButton } from "../../src/components/module-screen";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Badge, CommandButton, EmptyPanel, PageHeader, TableCard, TableHeader } from "../../src/components/feature-ui";
+import { Button, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
-import { quickCreate } from "../../src/components/quick-create";
+import { colors, typography } from "../../src/lib/theme";
 
 export default function Transfers() {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [fromOutletId, setFromOutletId] = useState("");
+  const [toOutletId, setToOutletId] = useState("");
+  const [productId, setProductId] = useState("");
+  const [qty, setQty] = useState("");
+  const { data: transfers = [] } = useQuery({ queryKey: ["transfers"], queryFn: api.transfers });
+  const { data: outlets = [] } = useQuery({ queryKey: ["outlets"], queryFn: api.outlets });
+  const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products });
+
+  const shops = useMemo(() => outlets.map((outlet) => ({ id: String(outlet.id), name: String(outlet.name), type: String(outlet.type ?? "") })), [outlets]);
+  const selectedProduct = products.find((product) => product.id === productId);
+
+  const create = useMutation({
+    mutationFn: () => api.createTransfer({ fromOutletId, toOutletId, lines: [{ productId, qty: Number(qty || 0) }] }),
+    onSuccess: async () => {
+      setOpen(false);
+      setQty("");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["transfers"] }),
+        queryClient.invalidateQueries({ queryKey: ["inventory"] })
+      ]);
+    }
+  });
+  const receive = useMutation({
+    mutationFn: api.receiveTransfer,
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["transfers"] }),
+        queryClient.invalidateQueries({ queryKey: ["inventory"] }),
+        queryClient.invalidateQueries({ queryKey: ["products"] })
+      ]);
+    }
+  });
+
+  function openNew() {
+    setFromOutletId(shops[0]?.id ?? "");
+    setToOutletId(shops[1]?.id ?? shops[0]?.id ?? "");
+    setProductId(products[0]?.id ?? "");
+    setQty("");
+    setOpen(true);
+  }
+
   return (
-    <DataModuleScreen
-      title="Transfers"
-      subtitle="Outlet-to-outlet and warehouse stock transfers with sent and received states."
-      queryKey="transfers"
-      queryFn={api.transfers as never}
-      primaryAction={quickCreate.transfer("10000000-0000-0000-0000-000000000001", "10000000-0000-0000-0000-000000000001", "30000000-0000-0000-0000-000000000001")}
-      columns={["Transfer", "Status", "Items"]}
-      renderRow={(row) => (
-        <View>
-          <Text style={{ fontWeight: "900" }}>{String(row.id)}</Text>
-          <Text>{String(row.status)} - {String(row.createdAt)}</Text>
-          <Text>{String(row.totalItems ?? 0)} items</Text>
-        </View>
-      )}
-    />
+    <Screen>
+      <ScrollView contentContainerStyle={styles.content}>
+        <PageHeader
+          eyebrow="Inventory"
+          title="Transfers"
+          description="Move stock between warehouses and POS shops, then receive it into the destination inventory."
+          actions={<CommandButton icon="plus" label="New transfer" primary onPress={openNew} />}
+        />
+        {transfers.length ? (
+          <TableCard>
+            <TableHeader columns={["Transfer", "From", "To", "Status", "Items", "Created", ""]} />
+            {transfers.map((transfer) => (
+              <View key={transfer.id} style={styles.row}>
+                <Text style={styles.cellText}>{transfer.id.slice(0, 8).toUpperCase()}</Text>
+                <Text style={styles.cellText}>{transfer.fromOutletName ?? transfer.fromOutletId}</Text>
+                <Text style={styles.cellText}>{transfer.toOutletName ?? transfer.toOutletId}</Text>
+                <View style={styles.cell}><Badge tone={transfer.status === "received" ? "success" : "warning"}>{transfer.status}</Badge></View>
+                <Text style={styles.rightCell}>{transfer.totalItems}</Text>
+                <Text style={styles.mutedText}>{new Date(transfer.createdAt).toLocaleString()}</Text>
+                <View style={styles.cell}>
+                  {transfer.status !== "received" ? (
+                    <Pressable style={styles.receiveButton} onPress={() => receive.mutate(transfer.id)}>
+                      <MaterialCommunityIcons name="package-check" size={15} color="#FFF7EF" />
+                      <Text style={styles.receiveText}>Receive</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              </View>
+            ))}
+          </TableCard>
+        ) : <EmptyPanel icon="swap-horizontal" title="No transfers yet" body="Create a transfer to move stock from a warehouse into a shop, or between shops." action={<CommandButton icon="plus" label="New transfer" primary onPress={openNew} />} />}
+      </ScrollView>
+
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
+          <Pressable style={styles.panel}>
+            <Text style={styles.modalTitle}>New transfer</Text>
+            <PickerRail label="From" items={shops} value={fromOutletId} onChange={setFromOutletId} />
+            <PickerRail label="To" items={shops} value={toOutletId} onChange={setToOutletId} />
+            <PickerRail label="Product" items={products.map((product) => ({ id: product.id, name: product.name }))} value={productId} onChange={setProductId} />
+            <Field value={qty} onChangeText={setQty} keyboardType="numeric" placeholder="Quantity" />
+            <Text style={styles.summary}>{selectedProduct?.stock ?? 0} units currently available across all locations.</Text>
+            {create.error ? <Text style={styles.error}>{create.error instanceof Error ? create.error.message : "Transfer failed"}</Text> : null}
+            <View style={styles.actions}>
+              <Button variant="outline" onPress={() => setOpen(false)}>Cancel</Button>
+              <Button onPress={() => create.mutate()} disabled={!fromOutletId || !toOutletId || fromOutletId === toOutletId || !productId || !Number(qty) || create.isPending}>Create</Button>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </Screen>
   );
 }
+
+function PickerRail({ label, items, value, onChange }: { label: string; items: { id: string; name: string }[]; value: string; onChange: (id: string) => void }) {
+  return (
+    <View style={{ gap: 7 }}>
+      <Text style={styles.sectionLabel}>{label}</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionRail}>
+        {items.map((item) => {
+          const active = value === item.id;
+          return (
+            <Pressable key={item.id} style={[styles.optionChip, active && styles.optionChipActive]} onPress={() => onChange(item.id)}>
+              <Text style={[styles.optionText, active && styles.optionTextActive]}>{item.name}</Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  content: { gap: 14, padding: 18, width: "100%", maxWidth: 1240, alignSelf: "center" },
+  row: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 11 },
+  cell: { flex: 1, minWidth: 100 },
+  cellText: { flex: 1, minWidth: 130, color: colors.ink, fontWeight: "800" },
+  mutedText: { flex: 1, minWidth: 140, color: colors.muted, fontSize: 12 },
+  rightCell: { flex: 1, minWidth: 80, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
+  receiveButton: { minHeight: 32, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, borderRadius: 7, backgroundColor: colors.accent, paddingHorizontal: 10 },
+  receiveText: { color: "#FFF7EF", fontSize: 12, fontWeight: "900" },
+  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },
+  panel: { width: "100%", maxWidth: 560, gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },
+  modalTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 23, fontWeight: "700" },
+  sectionLabel: { color: colors.muted, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
+  optionRail: { gap: 8 },
+  optionChip: { minHeight: 34, justifyContent: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 7, backgroundColor: colors.surface, paddingHorizontal: 11 },
+  optionChipActive: { backgroundColor: colors.sidebar, borderColor: colors.sidebar },
+  optionText: { color: colors.muted, fontSize: 12, fontWeight: "900" },
+  optionTextActive: { color: colors.sidebarText },
+  summary: { color: colors.muted, fontSize: 12 },
+  error: { color: colors.danger, fontWeight: "800" },
+  actions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 }
+});

@@ -31,7 +31,7 @@ const productSchema = z.object({
   cost: z.number().nonnegative().default(0),
   price: z.number().nonnegative().default(0),
   reorder: z.number().nonnegative().default(0),
-  imageUrl: z.string().max(1_500_000).nullable().optional()
+  imageUrl: z.string().max(140_000).nullable().optional()
 });
 
 const partySchema = z.object({
@@ -440,8 +440,30 @@ export async function registerModuleRoutes(app: FastifyInstance) {
 
   app.delete("/products/:id", async (request) => {
     const params = idParam.parse(request.params);
-    await pool.query("update products set status = 'archived', deleted_at = now(), version = version + 1 where id = $1", [params.id]);
-    return { ok: true };
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const product = await client.query("select id, name from products where id = $1 for update", [params.id]);
+      if (!product.rows[0]) throw app.httpErrors.notFound("Product not found");
+      await client.query("delete from transfer_lines where product_id = $1", [params.id]);
+      await client.query("delete from stock_count_lines where product_id = $1", [params.id]);
+      await client.query("delete from grn_lines where product_id = $1", [params.id]);
+      await client.query("delete from sale_lines where product_id = $1", [params.id]);
+      await client.query("delete from purchase_order_lines where product_id = $1", [params.id]);
+      await client.query("delete from stock_movements where product_id = $1", [params.id]);
+      await client.query("delete from bom_components where material_id = $1", [params.id]);
+      await client.query("delete from production_batches where bom_id in (select id from boms where product_id = $1)", [params.id]);
+      await client.query("delete from boms where product_id = $1", [params.id]);
+      await client.query("delete from products where id = $1", [params.id]);
+      await client.query("insert into audit_log (action, entity, entity_id, detail) values ('product.delete', 'product', $1, $2)", [params.id, `Deleted ${product.rows[0].name}`]);
+      await client.query("commit");
+      return { ok: true };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   app.get("/inventory/batches", async () => {
@@ -539,10 +561,13 @@ export async function registerModuleRoutes(app: FastifyInstance) {
   app.get("/transfers", async () => {
     const result = await pool.query(`
       select t.id, t.from_outlet_id as "fromOutletId", t.to_outlet_id as "toOutletId",
+             fo.name as "fromOutletName", tor.name as "toOutletName",
              t.status, t.created_at as "createdAt", coalesce(sum(tl.qty), 0) as "totalItems"
       from transfers t
+      join outlets fo on fo.id = t.from_outlet_id
+      join outlets tor on tor.id = t.to_outlet_id
       left join transfer_lines tl on tl.transfer_id = t.id
-      group by t.id
+      group by t.id, fo.name, tor.name
       order by t.created_at desc
     `);
     return result.rows.map((x) => ({ ...x, totalItems: numberify(x.totalItems) }));
@@ -559,7 +584,7 @@ export async function registerModuleRoutes(app: FastifyInstance) {
     try {
       await client.query("begin");
       const transfer = await client.query(
-        "insert into transfers (from_outlet_id, to_outlet_id, created_by) values ($1, $2, $3) returning id",
+        "insert into transfers (from_outlet_id, to_outlet_id, created_by, status) values ($1, $2, $3, 'sent') returning id",
         [body.fromOutletId, body.toOutletId, body.createdBy ?? null]
       );
       for (const line of body.lines) {
@@ -604,9 +629,17 @@ export async function registerModuleRoutes(app: FastifyInstance) {
   app.get("/boms", async () => {
     const result = await pool.query(`
       select b.id, b.product_id as "productId", p.name as "productName", b.name,
-             b.output_qty as "outputQty", b.labor_cost as "laborCost", b.overhead_cost as overhead
+             b.output_qty as "outputQty", b.labor_cost as "laborCost", b.overhead_cost as overhead,
+             coalesce(json_agg(json_build_object(
+               'productId', bc.material_id,
+               'productName', mp.name,
+               'qty', bc.qty
+             ) order by mp.name) filter (where bc.id is not null), '[]') as components
       from boms b
       join products p on p.id = b.product_id
+      left join bom_components bc on bc.bom_id = b.id
+      left join products mp on mp.id = bc.material_id
+      group by b.id, p.name
       order by b.created_at desc
     `);
     return result.rows.map((x) => ({
@@ -615,6 +648,38 @@ export async function registerModuleRoutes(app: FastifyInstance) {
       laborCost: numberify(x.laborCost),
       overhead: numberify(x.overhead)
     }));
+  });
+
+  app.post("/boms", async (request) => {
+    const body = z.object({
+      productId: z.string().uuid(),
+      name: z.string().min(1),
+      outputQty: z.number().positive().default(1),
+      laborCost: z.number().nonnegative().default(0),
+      overhead: z.number().nonnegative().default(0),
+      components: z.array(z.object({ productId: z.string().uuid(), qty: z.number().positive() })).min(1)
+    }).parse(request.body);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const bom = await client.query(
+        `insert into boms (product_id, name, output_qty, labor_cost, overhead_cost)
+         values ($1, $2, $3, $4, $5)
+         returning id`,
+        [body.productId, body.name, body.outputQty, body.laborCost, body.overhead]
+      );
+      for (const component of body.components) {
+        await client.query("insert into bom_components (bom_id, material_id, qty) values ($1, $2, $3)", [bom.rows[0].id, component.productId, component.qty]);
+      }
+      await client.query("insert into audit_log (action, entity, entity_id, detail) values ('bom.create', 'bom', $1, $2)", [bom.rows[0].id, `Created ${body.name}`]);
+      await client.query("commit");
+      return { id: bom.rows[0].id };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   app.get("/production", async () => {

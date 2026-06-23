@@ -126,6 +126,8 @@ export interface Transfer {
   id: Id;
   fromOutletId: Id;
   toOutletId: Id;
+  fromOutletName?: string;
+  toOutletName?: string;
   status: "draft" | "sent" | "received" | "cancelled";
   totalItems: number;
   createdAt: string;
@@ -190,6 +192,7 @@ export interface Bom {
   laborCost: number;
   overhead: number;
   outputQty?: number;
+  components?: { productId: Id; productName?: string; qty: number }[];
 }
 
 export interface ProductionBatch {

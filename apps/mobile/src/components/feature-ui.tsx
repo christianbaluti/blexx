@@ -118,8 +118,14 @@ export function CommandButton({
   );
 }
 
-export function TableCard({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
-  return <Card style={[styles.tableCard, style]}>{children}</Card>;
+export function TableCard({ children, style, minWidth = 760 }: { children: ReactNode; style?: StyleProp<ViewStyle>; minWidth?: number }) {
+  return (
+    <Card style={[styles.tableCard, style]}>
+      <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={[styles.tableScrollContent, { minWidth }]}>
+        <View style={{ minWidth, flex: 1 }}>{children}</View>
+      </ScrollView>
+    </Card>
+  );
 }
 
 export function TableHeader({ columns }: { columns: string[] }) {
@@ -196,6 +202,7 @@ const styles = StyleSheet.create({
   commandText: { color: colors.ink, fontSize: 13, fontWeight: "900" },
   primaryCommandText: { color: "#FFF7EF", fontSize: 13, fontWeight: "900" },
   tableCard: { padding: 0, overflow: "hidden" },
+  tableScrollContent: { flexGrow: 1 },
   tableHeader: { flexDirection: "row", gap: 10, backgroundColor: colors.surfaceAlt, borderBottomWidth: 1, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 10 },
   tableHeaderText: { flex: 1, color: colors.muted, fontSize: 10, fontWeight: "900", textTransform: "uppercase" },
   emptyPanel: { minHeight: 210, alignItems: "center", justifyContent: "center" },

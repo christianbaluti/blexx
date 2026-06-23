@@ -216,6 +216,9 @@ export const api = {
   updateProduct(id: string, payload: Record<string, unknown>) {
     return request<{ ok: boolean }>(`/products/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
   },
+  deleteProduct(id: string) {
+    return request<{ ok: boolean }>(`/products/${id}`, { method: "DELETE" });
+  },
   createSupplier(payload: Record<string, unknown>) {
     return request<{ id: string }>("/suppliers", { method: "POST", body: JSON.stringify(payload) });
   },
@@ -236,6 +239,12 @@ export const api = {
   },
   createTransfer(payload: Record<string, unknown>) {
     return request<{ id: string }>("/transfers", { method: "POST", body: JSON.stringify(payload) });
+  },
+  receiveTransfer(id: string) {
+    return request<{ ok: boolean }>(`/transfers/${id}/receive`, { method: "POST" });
+  },
+  createBom(payload: Record<string, unknown>) {
+    return request<{ id: string }>("/boms", { method: "POST", body: JSON.stringify(payload) });
   },
   createUser(payload: Record<string, unknown>) {
     return request<{ id: string }>("/users", { method: "POST", body: JSON.stringify(payload) });

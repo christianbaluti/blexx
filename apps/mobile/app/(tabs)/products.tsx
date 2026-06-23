@@ -2,7 +2,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
 import { useMemo, useState } from "react";
-import { ActivityIndicator, Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { Product } from "@blex/shared";
 import { formatMwk } from "@blex/shared";
 import { Badge, CommandButton, MetricCard, PageHeader, TableCard, TableHeader } from "../../src/components/feature-ui";
@@ -40,6 +40,7 @@ const emptyForm: ProductForm = {
   isSellable: true,
   isRaw: false
 };
+const MAX_IMAGE_BYTES = 100 * 1024;
 
 function productToForm(product: Product): ProductForm {
   return {
@@ -106,6 +107,19 @@ export default function Products() {
       ]);
     }
   });
+  const deleteProduct = useMutation({
+    mutationFn: (id: string) => api.deleteProduct(id),
+    onSuccess: async () => {
+      setFormOpen(false);
+      setEditing(null);
+      setForm(emptyForm);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["products"] }),
+        queryClient.invalidateQueries({ queryKey: ["inventory"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] })
+      ]);
+    }
+  });
 
   if (!auth.isAuthenticated) return <Login />;
 
@@ -124,17 +138,19 @@ export default function Products() {
   async function pickImage() {
     const result = await ImagePicker.launchImageLibraryAsync({
       base64: true,
-      quality: 0.55,
+      quality: 0.18,
       allowsEditing: true,
       aspect: [1, 1],
       mediaTypes: ImagePicker.MediaTypeOptions.Images
     });
     if (result.canceled || !result.assets[0]?.base64) return;
     const asset = result.assets[0];
-    setForm((current) => ({
-      ...current,
-      imageUrl: `data:${asset.mimeType ?? "image/jpeg"};base64,${asset.base64}`
-    }));
+    const imageUrl = `data:${asset.mimeType ?? "image/jpeg"};base64,${asset.base64}`;
+    if (dataUrlBytes(imageUrl) > MAX_IMAGE_BYTES) {
+      Alert.alert("Image too large", "The optimized image is still above 100 KB. Please choose a smaller square image.");
+      return;
+    }
+    setForm((current) => ({ ...current, imageUrl }));
   }
 
   const exportRows = filtered.map((product) => ({
@@ -221,9 +237,20 @@ export default function Products() {
         onPickImage={pickImage}
         onClose={() => setFormOpen(false)}
         onSave={() => saveProduct.mutate()}
+        onDelete={editing ? () => {
+          Alert.alert("Delete product", "This will permanently delete this product and its linked stock/BOM rows from the database.", [
+            { text: "Cancel", style: "cancel" },
+            { text: "Delete", style: "destructive", onPress: () => deleteProduct.mutate(editing.id) }
+          ]);
+        } : undefined}
       />
     </Screen>
   );
+}
+
+function dataUrlBytes(dataUrl: string) {
+  const base64 = dataUrl.split(",")[1] ?? "";
+  return Math.ceil((base64.length * 3) / 4);
 }
 
 function ProductModal({
@@ -236,7 +263,8 @@ function ProductModal({
   onChange,
   onPickImage,
   onClose,
-  onSave
+  onSave,
+  onDelete
 }: {
   open: boolean;
   editing: Product | null;
@@ -248,6 +276,7 @@ function ProductModal({
   onPickImage: () => void;
   onClose: () => void;
   onSave: () => void;
+  onDelete?: () => void;
 }) {
   return (
     <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}>
@@ -285,6 +314,7 @@ function ProductModal({
             </View>
             {error ? <Text style={styles.error}>{error}</Text> : null}
             <View style={styles.modalActions}>
+              {onDelete ? <Button variant="ghost" onPress={onDelete}>Delete</Button> : null}
               <Button variant="outline" onPress={onClose}>Cancel</Button>
               <Button onPress={onSave} disabled={saving || !form.sku.trim() || !form.name.trim()}>{saving ? "Saving..." : "Save product"}</Button>
             </View>

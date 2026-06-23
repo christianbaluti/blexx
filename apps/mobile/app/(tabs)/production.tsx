@@ -1,21 +1,49 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { formatMwk } from "@blex/shared";
 import { Badge, CommandButton, EmptyPanel, MetricCard, PageHeader, TabBar, TableCard, TableHeader } from "../../src/components/feature-ui";
-import { Card, Screen } from "../../src/components/ui";
+import { Button, Card, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
 type ProductionTab = "bom" | "batches" | "waste";
 
 export default function Production() {
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<ProductionTab>("bom");
+  const [open, setOpen] = useState(false);
+  const [bomId, setBomId] = useState("");
+  const [outletId, setOutletId] = useState("");
+  const [qtyProduced, setQtyProduced] = useState("1");
+  const [qtyWaste, setQtyWaste] = useState("0");
   const { data: boms = [] } = useQuery({ queryKey: ["boms"], queryFn: api.boms });
   const { data: batches = [] } = useQuery({ queryKey: ["production"], queryFn: api.production });
+  const { data: outlets = [] } = useQuery({ queryKey: ["outlets"], queryFn: api.outlets });
   const totalCost = batches.reduce((sum, batch) => sum + batch.totalCost, 0);
   const totalWaste = batches.reduce((sum, batch) => sum + batch.qtyWaste, 0);
+  const selectedBom = boms.find((bom) => bom.id === bomId);
+  const runProduction = useMutation({
+    mutationFn: () => api.createProduction({ bomId, outletId, qtyProduced: Number(qtyProduced || 0), qtyWaste: Number(qtyWaste || 0) }),
+    onSuccess: async () => {
+      setOpen(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["production"] }),
+        queryClient.invalidateQueries({ queryKey: ["inventory"] }),
+        queryClient.invalidateQueries({ queryKey: ["products"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] })
+      ]);
+    }
+  });
+
+  function openRun(nextBomId?: string) {
+    setBomId(nextBomId ?? boms[0]?.id ?? "");
+    setOutletId(String(outlets[0]?.id ?? ""));
+    setQtyProduced("1");
+    setQtyWaste("0");
+    setOpen(true);
+  }
 
   return (
     <Screen>
@@ -24,7 +52,7 @@ export default function Production() {
           eyebrow="Operations"
           title="Production"
           description="Bills of material, batches, raw material deduction, waste tracking and cost calculations."
-          actions={<CommandButton icon="plus" label="New batch" primary />}
+          actions={<CommandButton icon="plus" label="New batch" primary onPress={() => openRun()} />}
         />
         <View style={styles.metrics}>
           <MetricCard label="BOMs" value={boms.length} icon="file-tree-outline" />
@@ -54,7 +82,7 @@ export default function Production() {
                       <Text style={styles.bomTitle}>{bom.name}</Text>
                       <Text style={styles.rowMeta}>Produces {bom.productName ?? bom.productId}</Text>
                     </View>
-                    <CommandButton icon="source-branch" label="Run production" />
+                    <CommandButton icon="source-branch" label="Run production" onPress={() => openRun(bom.id)} />
                   </View>
                   <View style={styles.bomGrid}>
                     <View style={styles.recipePanel}>
@@ -91,7 +119,7 @@ export default function Production() {
                 </View>
               ))}
             </TableCard>
-          ) : <EmptyPanel icon="factory" title="No production batches yet" body="Run a BOM to produce finished goods and deduct raw materials." action={<CommandButton icon="plus" label="New batch" primary />} />
+          ) : <EmptyPanel icon="factory" title="No production batches yet" body="Run a BOM to produce finished goods and deduct raw materials." action={<CommandButton icon="plus" label="New batch" primary onPress={() => openRun()} />} />
         ) : null}
 
         {tab === "waste" ? (
@@ -111,7 +139,47 @@ export default function Production() {
           ) : <EmptyPanel icon="delete-alert-outline" title="No waste recorded" body="Waste from production batches will be flagged here for finance and inventory review." />
         ) : null}
       </ScrollView>
+
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
+          <Pressable style={styles.panel}>
+            <Text style={styles.modalTitle}>Run production</Text>
+            <PickerRail label="BOM blueprint" items={boms.map((bom) => ({ id: bom.id, name: bom.name }))} value={bomId} onChange={setBomId} />
+            <PickerRail label="Warehouse or shop" items={outlets.map((outlet) => ({ id: String(outlet.id), name: String(outlet.name) }))} value={outletId} onChange={setOutletId} />
+            <View style={styles.grid}>
+              <Field style={styles.gridField} value={qtyProduced} onChangeText={setQtyProduced} keyboardType="numeric" placeholder="Produced quantity" />
+              <Field style={styles.gridField} value={qtyWaste} onChangeText={setQtyWaste} keyboardType="numeric" placeholder="Wasted quantity" />
+            </View>
+            <Text style={styles.summaryText}>
+              Expected output per build: {selectedBom?.outputQty ?? 1}. Materials are deducted from the selected location.
+            </Text>
+            {runProduction.error ? <Text style={styles.error}>{runProduction.error instanceof Error ? runProduction.error.message : "Production failed"}</Text> : null}
+            <View style={styles.modalActions}>
+              <Button variant="outline" onPress={() => setOpen(false)}>Cancel</Button>
+              <Button onPress={() => runProduction.mutate()} disabled={!bomId || !outletId || !Number(qtyProduced) || runProduction.isPending}>Run</Button>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </Screen>
+  );
+}
+
+function PickerRail({ label, items, value, onChange }: { label: string; items: { id: string; name: string }[]; value: string; onChange: (id: string) => void }) {
+  return (
+    <View style={{ gap: 7 }}>
+      <Text style={styles.sectionLabel}>{label}</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionRail}>
+        {items.map((item) => {
+          const active = value === item.id;
+          return (
+            <Pressable key={item.id} style={[styles.optionChip, active && styles.optionChipActive]} onPress={() => onChange(item.id)}>
+              <Text style={[styles.optionText, active && styles.optionTextActive]}>{item.name}</Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -138,5 +206,19 @@ const styles = StyleSheet.create({
   mutedText: { flex: 1, minWidth: 140, color: colors.muted, fontSize: 12 },
   rightCell: { flex: 1, minWidth: 90, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
   rowMeta: { color: colors.muted, fontSize: 12 },
-  valueText: { color: colors.ink, fontFamily: typography.monoMedium, fontWeight: "900" }
+  valueText: { color: colors.ink, fontFamily: typography.monoMedium, fontWeight: "900" },
+  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },
+  panel: { width: "100%", maxWidth: 560, gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },
+  modalTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 23, fontWeight: "700" },
+  sectionLabel: { color: colors.muted, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
+  optionRail: { gap: 8 },
+  optionChip: { minHeight: 34, justifyContent: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 7, backgroundColor: colors.surface, paddingHorizontal: 11 },
+  optionChipActive: { backgroundColor: colors.sidebar, borderColor: colors.sidebar },
+  optionText: { color: colors.muted, fontSize: 12, fontWeight: "900" },
+  optionTextActive: { color: colors.sidebarText },
+  grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  gridField: { flex: 1, minWidth: 180 },
+  summaryText: { color: colors.muted, fontSize: 12 },
+  error: { color: colors.danger, fontWeight: "800" },
+  modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 }
 });
