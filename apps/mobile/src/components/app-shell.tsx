@@ -1,9 +1,11 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router, Slot, usePathname } from "expo-router";
 import { useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BrandLockup, StartupScreen } from "./brand";
+import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useSyncEngine } from "../lib/syncEngine";
 import { colors, typography } from "../lib/theme";
@@ -65,6 +67,7 @@ export function AppShell() {
   const isCompact = width < 820;
   const compactTopInset = isCompact ? Math.max(insets.top, 54) : 0;
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const auth = useAuth();
   const sync = useSyncEngine();
   const pathname = usePathname().replace("/(tabs)", "");
@@ -96,8 +99,9 @@ export function AppShell() {
               <TextInput placeholder="Search products, sales, customers" placeholderTextColor={colors.muted} style={styles.searchInput} />
             </View>
           ) : null}
-          <Pressable style={styles.iconButton}>
+          <Pressable style={styles.iconButton} onPress={() => setNotificationsOpen(true)}>
             <MaterialCommunityIcons name="bell-outline" size={20} color={colors.ink} />
+            <NotificationDot />
           </Pressable>
           <SyncPill status={sync.status} pending={sync.summary.pending} conflicts={sync.summary.conflicts} />
         </View>
@@ -108,7 +112,58 @@ export function AppShell() {
           <Pressable style={styles.drawer}>{nav}</Pressable>
         </Pressable>
       </Modal>
+      <NotificationModal visible={notificationsOpen} onClose={() => setNotificationsOpen(false)} />
     </View>
+  );
+}
+
+function NotificationDot() {
+  const { data = [] } = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, refetchInterval: 60_000 });
+  const unread = data.filter((item) => !item.read).length;
+  if (!unread) return null;
+  return <View style={styles.notificationDot}><Text style={styles.notificationDotText}>{unread > 9 ? "9+" : unread}</Text></View>;
+}
+
+function NotificationModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const { data = [] } = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, enabled: visible });
+  const markRead = useMutation({
+    mutationFn: api.markNotificationRead,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] })
+  });
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.backdrop} onPress={onClose}>
+        <Pressable style={styles.notificationPanel}>
+          <View style={styles.notificationHeader}>
+            <Text style={styles.notificationTitle}>Notifications</Text>
+            <Pressable style={styles.logoutButton} onPress={onClose}>
+              <MaterialCommunityIcons name="close" size={18} color={colors.ink} />
+            </Pressable>
+          </View>
+          <ScrollView contentContainerStyle={styles.notificationList}>
+            {data.map((item) => (
+              <Pressable
+                key={item.id}
+                style={[styles.notificationItem, !item.read && styles.notificationItemUnread]}
+                onPress={() => markRead.mutate(item.id)}
+              >
+                <Text style={styles.notificationItemTitle}>{item.title}</Text>
+                <Text style={styles.notificationBody}>{item.body ?? ""}</Text>
+                <Text style={styles.notificationMeta}>{new Date(item.ts).toLocaleString()} - {item.channel ?? "in_app"} - {item.status ?? "pending"}</Text>
+              </Pressable>
+            ))}
+            {!data.length ? <Text style={styles.notificationBody}>No notifications for your account.</Text> : null}
+          </ScrollView>
+          <Pressable style={styles.viewAllButton} onPress={() => {
+            onClose();
+            router.push("/notifications" as never);
+          }}>
+            <Text style={styles.viewAllText}>Open notifications page</Text>
+          </Pressable>
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -182,6 +237,8 @@ const styles = StyleSheet.create({
   searchBox: { width: 330, maxWidth: "34%", minHeight: 38, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 11, borderRadius: 7, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
   searchInput: { flex: 1, color: colors.ink, fontFamily: typography.sansRegular, fontSize: 13, outlineStyle: "none" as never },
   iconButton: { width: 38, height: 38, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
+  notificationDot: { position: "absolute", top: -5, right: -5, minWidth: 18, height: 18, borderRadius: 9, alignItems: "center", justifyContent: "center", backgroundColor: colors.danger, paddingHorizontal: 4 },
+  notificationDotText: { color: "#fff", fontFamily: typography.sansBlack, fontSize: 9 },
   logoBlock: { flexDirection: "row", alignItems: "center", gap: 10, padding: 14, borderBottomColor: colors.sidebarBorder, borderBottomWidth: 1 },
   navContent: { padding: 10, paddingBottom: 28 },
   section: { marginBottom: 12 },
@@ -200,5 +257,16 @@ const styles = StyleSheet.create({
   syncDot: { width: 8, height: 8, borderRadius: 4 },
   syncText: { fontFamily: typography.sansBold, fontSize: 12 },
   backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.28)" },
-  drawer: { width: 292, maxWidth: "84%", height: "100%", backgroundColor: colors.sidebar }
+  drawer: { width: 292, maxWidth: "84%", height: "100%", backgroundColor: colors.sidebar },
+  notificationPanel: { width: 390, maxWidth: "92%", maxHeight: "78%", alignSelf: "flex-end", marginTop: 76, marginRight: 14, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, overflow: "hidden" },
+  notificationHeader: { minHeight: 52, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: colors.line },
+  notificationTitle: { color: colors.ink, fontFamily: typography.sansBlack, fontSize: 16 },
+  notificationList: { padding: 10, gap: 8 },
+  notificationItem: { borderWidth: 1, borderColor: colors.line, borderRadius: 7, padding: 11, backgroundColor: colors.surface },
+  notificationItemUnread: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
+  notificationItemTitle: { color: colors.ink, fontFamily: typography.sansBlack, fontSize: 13 },
+  notificationBody: { color: colors.muted, fontFamily: typography.sansRegular, fontSize: 12, marginTop: 4 },
+  notificationMeta: { color: colors.muted, fontFamily: typography.sansMedium, fontSize: 10, marginTop: 7 },
+  viewAllButton: { minHeight: 42, alignItems: "center", justifyContent: "center", borderTopWidth: 1, borderTopColor: colors.line },
+  viewAllText: { color: colors.accent, fontFamily: typography.sansBlack, fontSize: 13 }
 });

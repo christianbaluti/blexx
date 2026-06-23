@@ -10,6 +10,27 @@ const loginSchema = z.object({
 });
 
 export async function registerAuthRoutes(app: FastifyInstance) {
+  app.get("/auth/me", async (request) => {
+    const jwt = await request.jwtVerify<{ sub: string; role?: Role }>();
+    const result = await pool.query(
+      `select u.id, u.username, u.email, u.full_name, coalesce(ur.role_id, $2) as role
+       from users u
+       left join user_roles ur on ur.user_id = u.id
+       where u.id = $1 and u.status = 'active'
+       limit 1`,
+      [jwt.sub, jwt.role ?? "pos_cashier"]
+    );
+    const row = result.rows[0];
+    if (!row) return app.httpErrors.unauthorized("Session user no longer exists");
+    return {
+      id: row.id,
+      username: row.username,
+      email: row.email,
+      name: row.full_name,
+      role: row.role as Role
+    } satisfies AuthUser;
+  });
+
   app.post("/auth/login", async (request, reply) => {
     const body = loginSchema.parse(request.body);
     const result = await pool.query(
@@ -34,6 +55,12 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       role: row.role as Role
     };
     const token = app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: "30d" });
+    await pool.query(
+      `insert into sessions (user_id, device_id, user_agent, ip, expires_at)
+       values ($1, $2, $3, $4, now() + interval '30 days')`,
+      [user.id, body.username.trim(), String(request.headers["user-agent"] ?? "").slice(0, 255), request.ip]
+    ).catch(() => undefined);
+    await pool.query("update users set last_login_at = now() where id = $1", [user.id]).catch(() => undefined);
     return { token, user };
   });
 }

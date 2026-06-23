@@ -2,7 +2,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useMemo, useState } from "react";
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Alert, FlatList, Image, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import type { Product, Sale } from "@blex/shared";
 import { formatMwk } from "@blex/shared";
 import { Button, Field, Screen } from "../../src/components/ui";
@@ -26,6 +26,7 @@ export default function Pos() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products, enabled: auth.isAuthenticated });
   const { data: categories = [] } = useQuery({ queryKey: ["categories"], queryFn: api.categories, enabled: auth.isAuthenticated });
+  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings, enabled: auth.isAuthenticated });
 
   const chips = useMemo(() => [{ id: "all", name: "All" }, ...categories], [categories]);
   const sellable = useMemo(
@@ -38,7 +39,8 @@ export default function Pos() {
   );
 
   const subtotal = cart.reduce((sum, line) => sum + line.product.price * line.qty, 0);
-  const tax = Math.round(subtotal * 0.165);
+  const vatRate = settings?.company.vatRate ?? 16.5;
+  const tax = Math.round(subtotal * (vatRate / 100));
   const total = subtotal + tax;
 
   const checkout = useMutation({
@@ -77,9 +79,19 @@ export default function Pos() {
   if (!auth.isAuthenticated) return <Login />;
 
   function add(product: Product) {
+    if (product.stock <= 0) {
+      Alert.alert("Out of stock", `${product.name} has no stock available.`);
+      return;
+    }
     setCart((current) => {
       const existing = current.find((line) => line.product.id === product.id);
-      if (existing) return current.map((line) => line.product.id === product.id ? { ...line, qty: line.qty + 1 } : line);
+      if (existing) {
+        if (existing.qty >= product.stock) {
+          Alert.alert("Stock limit reached", `Only ${product.stock} ${product.unit} available for ${product.name}.`);
+          return current;
+        }
+        return current.map((line) => line.product.id === product.id ? { ...line, qty: line.qty + 1 } : line);
+      }
       return [...current, { product, qty: 1 }];
     });
   }
@@ -88,7 +100,7 @@ export default function Pos() {
     setCart((current) => current.flatMap((line) => {
       if (line.product.id !== productId) return [line];
       if (qty <= 0) return [];
-      return [{ ...line, qty }];
+      return [{ ...line, qty: Math.min(qty, line.product.stock) }];
     }));
   }
 
@@ -148,10 +160,14 @@ export default function Pos() {
               contentContainerStyle={styles.tileList}
               keyExtractor={(item) => item.id}
               renderItem={({ item }) => (
-                <Pressable style={styles.tile} onPress={() => add(item)}>
-                  <View style={styles.tileInitialBlock}>
-                    <Text style={styles.tileInitial}>{item.name.charAt(0)}</Text>
-                  </View>
+                <Pressable style={[styles.tile, item.stock <= 0 && styles.tileDisabled]} onPress={() => add(item)}>
+                  {item.imageUrl ? (
+                    <Image source={{ uri: item.imageUrl }} style={styles.tileImage} />
+                  ) : (
+                    <View style={styles.tileInitialBlock}>
+                      <Text style={styles.tileInitial}>{item.name.charAt(0)}</Text>
+                    </View>
+                  )}
                   <Text style={styles.tileSku}>{item.sku}</Text>
                   <Text style={styles.tileName} numberOfLines={2}>{item.name}</Text>
                   <View style={styles.tileFooter}>
@@ -204,7 +220,7 @@ export default function Pos() {
 
             <View style={styles.totals}>
               <View style={styles.totalRow}><Text style={styles.totalLabel}>Subtotal</Text><Text style={styles.totalValue}>{formatMwk(subtotal)}</Text></View>
-              <View style={styles.totalRow}><Text style={styles.totalLabel}>VAT 16.5%</Text><Text style={styles.totalValue}>{formatMwk(tax)}</Text></View>
+              <View style={styles.totalRow}><Text style={styles.totalLabel}>VAT {vatRate}%</Text><Text style={styles.totalValue}>{formatMwk(tax)}</Text></View>
               <View style={styles.grandRow}><Text style={styles.grandLabel}>Total</Text><Text style={styles.grandValue}>{formatMwk(total)}</Text></View>
             </View>
 
@@ -249,7 +265,9 @@ const styles = StyleSheet.create({
   tileList: { gap: 10, paddingBottom: 20 },
   tileRow: { gap: 10 },
   tile: { flex: 1, minHeight: 166, borderRadius: 7, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 12 },
+  tileDisabled: { opacity: 0.55 },
   tileInitialBlock: { height: 48, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.surfaceAlt, marginBottom: 10 },
+  tileImage: { height: 58, borderRadius: 6, backgroundColor: colors.surfaceAlt, marginBottom: 10 },
   tileInitial: { color: colors.accent, fontFamily: typography.displayBold, fontSize: 26, fontWeight: "700" },
   tileSku: { color: colors.muted, fontSize: 10, fontWeight: "900", textTransform: "uppercase" },
   tileName: { color: colors.ink, fontSize: 14, fontWeight: "900", marginTop: 5, minHeight: 36 },

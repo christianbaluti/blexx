@@ -273,6 +273,52 @@ export interface NotificationItem {
   status?: "pending" | "sent" | "failed";
 }
 
+export interface AppSettings {
+  company: {
+    tradingName: string;
+    currency: string;
+    vatRate: number;
+    address: string;
+  };
+  downloads: {
+    androidUrl: string;
+    iosUrl: string;
+  };
+  security: {
+    requireTwoFactor: boolean;
+    biometricUnlock: boolean;
+    sessionAutoLockMinutes: number;
+    passwordExpiryDays: number;
+  };
+  notifications: {
+    lowStockEmailEnabled: boolean;
+    expiryEmailEnabled: boolean;
+  };
+}
+
+export const defaultAppSettings: AppSettings = {
+  company: {
+    tradingName: "POS & Inventory +",
+    currency: "MWK",
+    vatRate: 16.5,
+    address: ""
+  },
+  downloads: {
+    androidUrl: "https://expo.dev/accounts/christianbaluti/projects/pos-inventory-plus",
+    iosUrl: "Ask your administrator for the TestFlight invite"
+  },
+  security: {
+    requireTwoFactor: false,
+    biometricUnlock: true,
+    sessionAutoLockMinutes: 15,
+    passwordExpiryDays: 0
+  },
+  notifications: {
+    lowStockEmailEnabled: true,
+    expiryEmailEnabled: true
+  }
+};
+
 export interface DashboardSummary {
   revenue14d: number;
   stockValue: number;

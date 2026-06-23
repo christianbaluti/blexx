@@ -1,23 +1,66 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import type { Product } from "@blex/shared";
 import { formatMwk } from "@blex/shared";
 import { AlertPanel, Badge, CommandButton, EmptyPanel, PageHeader, TabBar, TableCard, TableHeader } from "../../src/components/feature-ui";
-import { Screen } from "../../src/components/ui";
+import { Button, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
 type InventoryTab = "stock" | "batches" | "adjustments" | "transfers" | "counts";
 
 export default function Inventory() {
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<InventoryTab>("stock");
+  const [adjustOpen, setAdjustOpen] = useState(false);
+  const [reason, setReason] = useState<"adjust" | "damage">("adjust");
+  const [productId, setProductId] = useState("");
+  const [outletId, setOutletId] = useState("");
+  const [qty, setQty] = useState("");
+  const [note, setNote] = useState("");
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products });
   const { data: inventory = [] } = useQuery({ queryKey: ["inventory"], queryFn: api.inventory });
+  const { data: outlets = [] } = useQuery({ queryKey: ["outlets"], queryFn: api.outlets });
   const { data: batches = [] } = useQuery({ queryKey: ["inventory-batches"], queryFn: api.batches });
   const { data: movements = [] } = useQuery({ queryKey: ["inventory-movements"], queryFn: api.movements });
   const { data: transfers = [] } = useQuery({ queryKey: ["transfers"], queryFn: api.transfers });
   const { data: counts = [] } = useQuery({ queryKey: ["stock-counts"], queryFn: api.stockCounts });
   const lowStock = products.filter((product) => product.stock <= product.reorder);
+  const selectedProduct = products.find((product) => product.id === productId);
+  const selectedOutlet = outlets.find((outlet) => String(outlet.id) === outletId);
+
+  const adjustStock = useMutation({
+    mutationFn: () =>
+      api.adjustInventory({
+        productId,
+        outletId,
+        qty: reason === "damage" ? -Math.abs(Number(qty || 0)) : Number(qty || 0),
+        reason,
+        note
+      }),
+    onSuccess: async () => {
+      setAdjustOpen(false);
+      setQty("");
+      setNote("");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["inventory"] }),
+        queryClient.invalidateQueries({ queryKey: ["inventory-movements"] }),
+        queryClient.invalidateQueries({ queryKey: ["products"] }),
+        queryClient.invalidateQueries({ queryKey: ["notifications"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] })
+      ]);
+    }
+  });
+
+  function openAdjustment(nextReason: "adjust" | "damage" = "adjust", product?: Product) {
+    setReason(nextReason);
+    setProductId(product?.id ?? products[0]?.id ?? "");
+    setOutletId(String(outlets[0]?.id ?? ""));
+    setQty("");
+    setNote(nextReason === "damage" ? "Damaged stock" : "Stock received");
+    setAdjustOpen(true);
+  }
 
   return (
     <Screen>
@@ -28,8 +71,8 @@ export default function Inventory() {
           description="Stock items, batches, adjustments, transfers and counts across all outlets."
           actions={
             <>
-              <CommandButton icon="swap-horizontal" label="Transfer" />
-              <CommandButton icon="plus" label="Receive stock" primary />
+              <CommandButton icon="clipboard-edit-outline" label="Adjustment" onPress={() => openAdjustment("damage")} />
+              <CommandButton icon="plus" label="Receive stock" primary onPress={() => openAdjustment("adjust")} />
             </>
           }
         />
@@ -67,7 +110,11 @@ export default function Inventory() {
                     <Text style={styles.rightMuted}>{product.reorder}</Text>
                     <Text style={styles.rightCell}>{formatMwk(product.cost)}</Text>
                     <Text style={styles.rightCell}>{formatMwk(product.cost * product.stock)}</Text>
-                    <View style={styles.cell}><Badge tone={reorder ? "danger" : "success"}>{reorder ? "Reorder" : "In stock"}</Badge></View>
+                    <View style={styles.cell}>
+                      <Pressable onPress={() => openAdjustment(reorder ? "adjust" : "damage", product)}>
+                        <Badge tone={reorder ? "danger" : "success"}>{reorder ? "Reorder" : "In stock"}</Badge>
+                      </Pressable>
+                    </View>
                   </View>
                 );
               })}
@@ -106,7 +153,7 @@ export default function Inventory() {
                 </View>
               ))}
             </TableCard>
-          ) : <EmptyPanel icon="clipboard-edit-outline" title="No adjustments yet" body="Damage, corrections and manual adjustments will show here." action={<CommandButton icon="plus" label="New adjustment" primary />} />
+          ) : <EmptyPanel icon="clipboard-edit-outline" title="No adjustments yet" body="Damage, corrections and manual adjustments will show here." action={<CommandButton icon="plus" label="New adjustment" primary onPress={() => openAdjustment("adjust")} />} />
         ) : null}
 
         {tab === "transfers" ? (
@@ -144,6 +191,53 @@ export default function Inventory() {
 
         {!inventory.length && tab === "stock" ? <Text style={styles.hint}>Outlet-level inventory is empty; product master stock is shown above.</Text> : null}
       </ScrollView>
+
+      <Modal visible={adjustOpen} transparent animationType="fade" onRequestClose={() => setAdjustOpen(false)}>
+        <Pressable style={styles.backdrop} onPress={() => setAdjustOpen(false)}>
+          <Pressable style={styles.panel}>
+            <Text style={styles.modalTitle}>{reason === "damage" ? "Record stock damage" : "Receive or adjust stock"}</Text>
+            <Text style={styles.sectionLabel}>Product</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionRail}>
+              {products.map((product) => (
+                <Pressable key={product.id} style={[styles.optionChip, productId === product.id && styles.optionChipActive]} onPress={() => setProductId(product.id)}>
+                  <Text style={[styles.optionText, productId === product.id && styles.optionTextActive]}>{product.name}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Text style={styles.sectionLabel}>Outlet</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionRail}>
+              {outlets.map((outlet) => {
+                const id = String(outlet.id);
+                return (
+                  <Pressable key={id} style={[styles.optionChip, outletId === id && styles.optionChipActive]} onPress={() => setOutletId(id)}>
+                    <Text style={[styles.optionText, outletId === id && styles.optionTextActive]}>{String(outlet.name)}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <View style={styles.reasonRow}>
+              <Pressable style={[styles.reasonButton, reason === "adjust" && styles.reasonButtonActive]} onPress={() => setReason("adjust")}>
+                <Text style={[styles.reasonText, reason === "adjust" && styles.reasonTextActive]}>Receive</Text>
+              </Pressable>
+              <Pressable style={[styles.reasonButton, reason === "damage" && styles.reasonButtonActive]} onPress={() => setReason("damage")}>
+                <Text style={[styles.reasonText, reason === "damage" && styles.reasonTextActive]}>Damage</Text>
+              </Pressable>
+            </View>
+            <Field value={qty} onChangeText={setQty} keyboardType="numeric" placeholder={reason === "damage" ? "Quantity damaged" : "Quantity to add"} />
+            <Field value={note} onChangeText={setNote} placeholder="Note or reference" />
+            <Text style={styles.summaryText}>
+              {selectedProduct?.name ?? "Select product"} at {String(selectedOutlet?.name ?? "selected outlet")}
+            </Text>
+            {adjustStock.error ? <Text style={styles.error}>{adjustStock.error instanceof Error ? adjustStock.error.message : "Adjustment failed"}</Text> : null}
+            <View style={styles.modalActions}>
+              <Button variant="outline" onPress={() => setAdjustOpen(false)}>Cancel</Button>
+              <Button onPress={() => adjustStock.mutate()} disabled={!productId || !outletId || !Number(qty) || adjustStock.isPending}>
+                {adjustStock.isPending ? "Saving..." : "Save"}
+              </Button>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </Screen>
   );
 }
@@ -159,5 +253,22 @@ const styles = StyleSheet.create({
   mutedText: { flex: 1, minWidth: 120, color: colors.muted, fontSize: 12 },
   rightCell: { flex: 1, minWidth: 90, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
   rightMuted: { flex: 1, minWidth: 90, color: colors.muted, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
-  hint: { color: colors.muted, textAlign: "center", fontSize: 12 }
+  hint: { color: colors.muted, textAlign: "center", fontSize: 12 },
+  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },
+  panel: { width: "100%", maxWidth: 520, gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },
+  modalTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 23, fontWeight: "700" },
+  sectionLabel: { color: colors.muted, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
+  optionRail: { gap: 8, paddingVertical: 1 },
+  optionChip: { minHeight: 34, justifyContent: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 7, backgroundColor: colors.surface, paddingHorizontal: 11 },
+  optionChipActive: { backgroundColor: colors.sidebar, borderColor: colors.sidebar },
+  optionText: { color: colors.muted, fontSize: 12, fontWeight: "900" },
+  optionTextActive: { color: colors.sidebarText },
+  reasonRow: { flexDirection: "row", gap: 8 },
+  reasonButton: { flex: 1, minHeight: 38, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.line },
+  reasonButtonActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  reasonText: { color: colors.ink, fontWeight: "900" },
+  reasonTextActive: { color: "#FFF7EF" },
+  summaryText: { color: colors.muted, fontSize: 12 },
+  error: { color: colors.danger, fontWeight: "800" },
+  modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 }
 });

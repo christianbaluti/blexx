@@ -207,14 +207,31 @@ export async function registerCommerceRoutes(app: FastifyInstance) {
     return result.rows;
   });
 
-  app.get("/notifications", async () => {
+  app.get("/notifications", async (request) => {
+    const jwt = await request.jwtVerify<{ sub: string }>();
     const result = await pool.query(`
-      select id, created_at as ts, type, title, body, is_read as read
-      from notifications
-      order by created_at desc
+      select n.id, n.created_at as ts, n.type, n.title, n.body, n.is_read as read,
+             d.channel, coalesce(d.status, 'pending') as status
+      from notifications n
+      left join lateral (
+        select channel, status
+        from notification_deliveries
+        where notification_id = n.id
+        order by created_at desc
+        limit 1
+      ) d on true
+      where n.user_id is null or n.user_id = $1
+      order by n.created_at desc
       limit 100
-    `);
+    `, [jwt.sub]);
     return result.rows;
+  });
+
+  app.post("/notifications/:id/read", async (request) => {
+    const jwt = await request.jwtVerify<{ sub: string }>();
+    const params = z.object({ id: z.string().uuid() }).parse(request.params);
+    await pool.query("update notifications set is_read = true where id = $1 and (user_id is null or user_id = $2)", [params.id, jwt.sub]);
+    return { ok: true };
   });
 }
 

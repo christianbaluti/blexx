@@ -1,5 +1,5 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { defaultAppBranding, type AppBranding } from "@blex/shared";
+import { defaultAppBranding, defaultAppSettings, type AppBranding, type AppSettings } from "@blex/shared";
 import * as ImagePicker from "expo-image-picker";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -12,19 +12,15 @@ import { colors, typography } from "../../src/lib/theme";
 
 type SettingsTab = "company" | "branding" | "users" | "security" | "sync" | "integrations" | "backups";
 
-const securityOptions = [
-  { label: "Two-factor authentication", description: "Require a TOTP code on every sign-in.", enabled: true },
-  { label: "Biometric unlock", description: "Allow fingerprint or face unlock on supported devices.", enabled: true },
-  { label: "Session auto-lock", description: "Lock the POS lane after 15 minutes of inactivity.", enabled: true },
-  { label: "Password expiry", description: "Force a password reset every quarter.", enabled: false }
-];
-
 export default function Settings() {
   const [tab, setTab] = useState<SettingsTab>("company");
   const [brandForm, setBrandForm] = useState<AppBranding>(defaultAppBranding);
+  const [settingsForm, setSettingsForm] = useState<AppSettings>(defaultAppSettings);
   const [brandError, setBrandError] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const { data: branding = defaultAppBranding } = useQuery({ queryKey: ["branding"], queryFn: api.branding });
+  const { data: settings = defaultAppSettings } = useQuery({ queryKey: ["settings"], queryFn: api.settings });
   const { data: users = [] } = useQuery({ queryKey: ["users"], queryFn: api.users });
   const { data: backups = [] } = useQuery({ queryKey: ["backups"], queryFn: api.backups });
   const { data: syncHealth } = useQuery({ queryKey: ["sync-health"], queryFn: api.syncHealth });
@@ -39,10 +35,24 @@ export default function Settings() {
     },
     onError: (error) => setBrandError(error instanceof Error ? error.message : "Could not save branding")
   });
+  const saveSettings = useMutation({
+    mutationFn: api.updateSettings,
+    onSuccess: (updated) => {
+      setSettingsError(null);
+      setSettingsForm(updated);
+      queryClient.setQueryData(["settings"], updated);
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+    onError: (error) => setSettingsError(error instanceof Error ? error.message : "Could not save settings")
+  });
 
   useEffect(() => {
     setBrandForm(branding);
   }, [branding]);
+
+  useEffect(() => {
+    setSettingsForm(settings);
+  }, [settings]);
 
   async function pickLogo() {
     setBrandError(null);
@@ -101,12 +111,15 @@ export default function Settings() {
         {tab === "company" ? (
           <Card style={styles.formCard}>
             <View style={styles.formGrid}>
-              <View style={styles.fieldBlock}><Text style={styles.label}>Trading name</Text><Field defaultValue="POS & Inventory +" /></View>
-              <View style={styles.fieldBlock}><Text style={styles.label}>Currency</Text><Field defaultValue="MWK - Malawian Kwacha" /></View>
-              <View style={styles.fieldBlock}><Text style={styles.label}>VAT rate (%)</Text><Field defaultValue="16.5" /></View>
-              <View style={styles.fieldBlockWide}><Text style={styles.label}>Address</Text><Field defaultValue="Area 47, Lilongwe, Malawi" /></View>
+              <View style={styles.fieldBlock}><Text style={styles.label}>Trading name</Text><Field value={settingsForm.company.tradingName} onChangeText={(tradingName) => setSettingsForm((current) => ({ ...current, company: { ...current.company, tradingName } }))} /></View>
+              <View style={styles.fieldBlock}><Text style={styles.label}>Currency</Text><Field value={settingsForm.company.currency} onChangeText={(currency) => setSettingsForm((current) => ({ ...current, company: { ...current.company, currency } }))} /></View>
+              <View style={styles.fieldBlock}><Text style={styles.label}>VAT rate (%)</Text><Field value={String(settingsForm.company.vatRate)} keyboardType="numeric" onChangeText={(vatRate) => setSettingsForm((current) => ({ ...current, company: { ...current.company, vatRate: Number(vatRate || 0) } }))} /></View>
+              <View style={styles.fieldBlockWide}><Text style={styles.label}>Address</Text><Field value={settingsForm.company.address} onChangeText={(address) => setSettingsForm((current) => ({ ...current, company: { ...current.company, address } }))} /></View>
+              <View style={styles.fieldBlockWide}><Text style={styles.label}>Android download link</Text><Field value={settingsForm.downloads.androidUrl} onChangeText={(androidUrl) => setSettingsForm((current) => ({ ...current, downloads: { ...current.downloads, androidUrl } }))} /></View>
+              <View style={styles.fieldBlockWide}><Text style={styles.label}>iOS download link</Text><Field value={settingsForm.downloads.iosUrl} onChangeText={(iosUrl) => setSettingsForm((current) => ({ ...current, downloads: { ...current.downloads, iosUrl } }))} /></View>
             </View>
-            <View style={styles.alignEnd}><CommandButton icon="content-save-outline" label="Save changes" primary /></View>
+            {settingsError ? <Text style={styles.errorText}>{settingsError}</Text> : null}
+            <View style={styles.alignEnd}><CommandButton icon="content-save-outline" label={saveSettings.isPending ? "Saving..." : "Save changes"} primary onPress={() => saveSettings.mutate(settingsForm)} /></View>
           </Card>
         ) : null}
 
@@ -182,17 +195,36 @@ export default function Settings() {
 
         {tab === "security" ? (
           <Card style={styles.formCard}>
-            {securityOptions.map((option) => (
-              <View key={option.label} style={styles.securityRow}>
+            {[
+              { key: "requireTwoFactor", label: "Two-factor authentication", description: "Require a TOTP code on every sign-in.", enabled: settingsForm.security.requireTwoFactor },
+              { key: "biometricUnlock", label: "Biometric unlock", description: "Allow fingerprint or face unlock on supported devices.", enabled: settingsForm.security.biometricUnlock },
+              { key: "lowStockEmailEnabled", label: "Low-stock email alerts", description: "Queue low-stock email alerts for inventory users.", enabled: settingsForm.notifications.lowStockEmailEnabled },
+              { key: "expiryEmailEnabled", label: "Expiry email alerts", description: "Queue expiry alert emails when batch checks are enabled.", enabled: settingsForm.notifications.expiryEmailEnabled }
+            ].map((option) => (
+              <View key={option.key} style={styles.securityRow}>
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.userName}>{option.label}</Text>
                   <Text style={styles.meta}>{option.description}</Text>
                 </View>
-                <Pressable style={[styles.switch, option.enabled && styles.switchOn]}>
+                <Pressable
+                  style={[styles.switch, option.enabled && styles.switchOn]}
+                  onPress={() => setSettingsForm((current) => {
+                    if (option.key === "lowStockEmailEnabled" || option.key === "expiryEmailEnabled") {
+                      return { ...current, notifications: { ...current.notifications, [option.key]: !option.enabled } };
+                    }
+                    return { ...current, security: { ...current.security, [option.key]: !option.enabled } };
+                  })}
+                >
                   <View style={[styles.knob, option.enabled && styles.knobOn]} />
                 </Pressable>
               </View>
             ))}
+            <View style={styles.formGrid}>
+              <View style={styles.fieldBlock}><Text style={styles.label}>Auto-lock minutes</Text><Field value={String(settingsForm.security.sessionAutoLockMinutes)} keyboardType="numeric" onChangeText={(value) => setSettingsForm((current) => ({ ...current, security: { ...current.security, sessionAutoLockMinutes: Number(value || 1) } }))} /></View>
+              <View style={styles.fieldBlock}><Text style={styles.label}>Password expiry days (0 disables)</Text><Field value={String(settingsForm.security.passwordExpiryDays)} keyboardType="numeric" onChangeText={(value) => setSettingsForm((current) => ({ ...current, security: { ...current.security, passwordExpiryDays: Number(value || 0) } }))} /></View>
+            </View>
+            {settingsError ? <Text style={styles.errorText}>{settingsError}</Text> : null}
+            <View style={styles.alignEnd}><CommandButton icon="content-save-outline" label={saveSettings.isPending ? "Saving..." : "Save security"} primary onPress={() => saveSettings.mutate(settingsForm)} /></View>
           </Card>
         ) : null}
 

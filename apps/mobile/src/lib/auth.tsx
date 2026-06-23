@@ -20,8 +20,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     loadAuthSession()
-      .then((session) => {
-        if (session) setUser(session.user);
+      .then(async (session) => {
+        if (!session) return;
+        setUser(session.user);
+        try {
+          const freshUser = await api.me();
+          await saveAuthSession({ token: session.token, user: freshUser });
+          setUser(freshUser);
+        } catch {
+          await clearAuthSession();
+          setUser(null);
+        }
       })
       .finally(() => setLoading(false));
   }, []);

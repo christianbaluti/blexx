@@ -1,6 +1,7 @@
 import type {
   AuditEntry,
   AppBranding,
+  AppSettings,
   AuthUser,
   BackupSnapshot,
   Bom,
@@ -32,6 +33,7 @@ import type {
   UserAccount
 } from "@blex/shared";
 import { defaultAppBranding } from "@blex/shared";
+import { defaultAppSettings } from "@blex/shared";
 import Constants from "expo-constants";
 import { Platform } from "react-native";
 import { readCacheAsync, saveCache } from "./localDb";
@@ -119,9 +121,17 @@ export const api = {
       body: JSON.stringify({ username, password })
     });
   },
+  me: () => request<AuthUser>("/auth/me"),
   branding: () => cached<AppBranding>("branding", "/settings/branding", defaultAppBranding),
   updateBranding(payload: AppBranding) {
     return request<AppBranding>("/settings/branding", {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+  },
+  settings: () => cached<AppSettings>("settings", "/settings", defaultAppSettings),
+  updateSettings(payload: AppSettings) {
+    return request<AppSettings>("/settings", {
       method: "PATCH",
       body: JSON.stringify(payload)
     });
@@ -145,6 +155,9 @@ export const api = {
   expenses: () => cached<Expense[]>("expenses", "/expenses", []),
   audit: () => cached<AuditEntry[]>("audit", "/audit", []),
   notifications: () => cached<NotificationItem[]>("notifications", "/notifications", []),
+  markNotificationRead(id: string) {
+    return request<{ ok: boolean }>(`/notifications/${id}/read`, { method: "POST" });
+  },
   users: () => cached<UserAccount[]>("users", "/users", []),
   roles: () => cached<RoleDetail[]>("roles", "/roles", []),
   inventory: () => cached<Record<string, unknown>[]>("inventory", "/inventory", []),
@@ -160,6 +173,10 @@ export const api = {
   credit: () => cached<Record<string, unknown>[]>("credit", "/credit", []),
   permissions: () => cached<Record<string, unknown>[]>("permissions", "/permissions", []),
   sessions: () => cached<Record<string, unknown>[]>("sessions", "/sessions", []),
+  revokeSession(id: string) {
+    return request<{ ok: boolean }>(`/sessions/${id}/revoke`, { method: "POST" });
+  },
+  outlets: () => cached<Record<string, unknown>[]>("outlets", "/outlets", []),
   glAccounts: () => cached<GlAccount[]>("gl-accounts", "/finance/accounts", []),
   ledger: () => cached<GlEntry[]>("ledger", "/finance/ledger", []),
   statements: () => cached<FinancialStatement>("statements", "/finance/statements", {
@@ -196,6 +213,9 @@ export const api = {
   createProduct(payload: Record<string, unknown>) {
     return request<{ id: string }>("/products", { method: "POST", body: JSON.stringify(payload) });
   },
+  updateProduct(id: string, payload: Record<string, unknown>) {
+    return request<{ ok: boolean }>(`/products/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+  },
   createSupplier(payload: Record<string, unknown>) {
     return request<{ id: string }>("/suppliers", { method: "POST", body: JSON.stringify(payload) });
   },
@@ -219,6 +239,9 @@ export const api = {
   },
   createUser(payload: Record<string, unknown>) {
     return request<{ id: string }>("/users", { method: "POST", body: JSON.stringify(payload) });
+  },
+  updateUser(id: string, payload: Record<string, unknown>) {
+    return request<Record<string, unknown>>(`/users/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
   },
   adjustInventory(payload: { productId: string; outletId: string; qty: number; reason: "adjust" | "damage"; note?: string }) {
     return request<{ ok: boolean }>("/inventory/adjustments", {

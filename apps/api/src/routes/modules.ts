@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { defaultAppBranding, type AppBranding } from "@blex/shared";
 import { numberify, pool } from "../db.js";
+import { config } from "../config.js";
 
 const idParam = z.object({ id: z.string().min(1) });
 const syncPushSchema = z.object({
@@ -30,7 +31,7 @@ const productSchema = z.object({
   cost: z.number().nonnegative().default(0),
   price: z.number().nonnegative().default(0),
   reorder: z.number().nonnegative().default(0),
-  imageUrl: z.string().nullable().optional()
+  imageUrl: z.string().max(1_500_000).nullable().optional()
 });
 
 const partySchema = z.object({
@@ -74,6 +75,56 @@ const brandingSchema = z.object({
   logoUpdatedAt: z.string().nullable().optional()
 });
 
+const appSettingsSchema = z.object({
+  company: z.object({
+    tradingName: z.string().min(2).max(120),
+    currency: z.string().min(2).max(40),
+    vatRate: z.number().min(0).max(100),
+    address: z.string().max(255)
+  }),
+  downloads: z.object({
+    androidUrl: z.string().min(1).max(500),
+    iosUrl: z.string().min(1).max(500)
+  }),
+  security: z.object({
+    requireTwoFactor: z.boolean(),
+    biometricUnlock: z.boolean(),
+    sessionAutoLockMinutes: z.number().min(1).max(240),
+    passwordExpiryDays: z.number().min(0).max(365)
+  }),
+  notifications: z.object({
+    lowStockEmailEnabled: z.boolean(),
+    expiryEmailEnabled: z.boolean()
+  })
+});
+
+type AppSettings = z.infer<typeof appSettingsSchema>;
+
+function defaultSettings(): AppSettings {
+  return {
+    company: {
+      tradingName: defaultAppBranding.appName,
+      currency: "MWK",
+      vatRate: 16.5,
+      address: ""
+    },
+    downloads: {
+      androidUrl: config.appDownloadAndroidUrl,
+      iosUrl: config.appDownloadIosUrl
+    },
+    security: {
+      requireTwoFactor: false,
+      biometricUnlock: true,
+      sessionAutoLockMinutes: 15,
+      passwordExpiryDays: 0
+    },
+    notifications: {
+      lowStockEmailEnabled: true,
+      expiryEmailEnabled: true
+    }
+  };
+}
+
 function normalizeBranding(value: unknown, updatedAt?: Date | string | null): AppBranding {
   const parsed = brandingSchema.partial().safeParse(value ?? {});
   const branding = {
@@ -84,6 +135,71 @@ function normalizeBranding(value: unknown, updatedAt?: Date | string | null): Ap
     ...branding,
     logoUpdatedAt: updatedAt ? new Date(updatedAt).toISOString() : branding.logoUpdatedAt ?? null
   };
+}
+
+function normalizeSettings(value: unknown): AppSettings {
+  const parsed = appSettingsSchema.partial().safeParse(value ?? {});
+  const base = defaultSettings();
+  if (!parsed.success) return base;
+  return {
+    company: { ...base.company, ...parsed.data.company },
+    downloads: { ...base.downloads, ...parsed.data.downloads },
+    security: { ...base.security, ...parsed.data.security },
+    notifications: { ...base.notifications, ...parsed.data.notifications }
+  };
+}
+
+async function getSettings() {
+  const result = await pool.query("select value from app_settings where key = 'settings'");
+  return normalizeSettings(result.rows[0]?.value);
+}
+
+async function ensureLowStockNotifications() {
+  const settings = await getSettings();
+  const lowStock = await pool.query(`
+    select p.id, p.name, p.sku, p.reorder_qty, coalesce(sum(sl.quantity), 0) as stock
+    from products p
+    left join stock_levels sl on sl.product_id = p.id
+    where p.status = 'active'
+    group by p.id
+    having coalesce(sum(sl.quantity), 0) <= p.reorder_qty
+    order by p.name
+  `);
+  if (!lowStock.rows.length) return;
+
+  const recipients = await pool.query(`
+    select distinct u.id, u.email
+    from users u
+    join user_roles ur on ur.user_id = u.id
+    left join role_permissions rp on rp.role_id = ur.role_id
+    where u.status = 'active'
+      and (ur.role_id in ('super_admin', 'inventory_officer') or rp.permission_id like 'inventory%')
+  `);
+
+  for (const product of lowStock.rows) {
+    const title = `Low stock: ${product.name}`;
+    const detail = `${product.name} (${product.sku}) is at ${numberify(product.stock)} against reorder ${numberify(product.reorder_qty)}.`;
+    for (const user of recipients.rows) {
+      const notification = await pool.query(
+        `insert into notifications (user_id, type, title, body)
+         select $1, 'low_stock', $2, $3
+         where not exists (
+           select 1 from notifications
+           where user_id = $1 and type = 'low_stock' and title = $2 and created_at > now() - interval '24 hours'
+         )
+         returning id`,
+        [user.id, title, detail]
+      );
+      const id = notification.rows[0]?.id;
+      if (id && settings.notifications.lowStockEmailEnabled) {
+        await pool.query(
+          `insert into notification_deliveries (notification_id, channel, recipient, status, error, sent_at)
+           values ($1, 'email', $2, $3, $4, case when $3 = 'sent' then now() else null end)`,
+          [id, user.email, config.smtpHost ? "sent" : "pending", config.smtpHost ? null : "SMTP is not configured; queued for email provider"]
+        );
+      }
+    }
+  }
 }
 
 export async function registerModuleRoutes(app: FastifyInstance) {
@@ -114,6 +230,23 @@ export async function registerModuleRoutes(app: FastifyInstance) {
     return normalizeBranding(result.rows[0].value, result.rows[0].updated_at);
   });
 
+  app.get("/settings", async () => getSettings());
+
+  app.patch("/settings", async (request) => {
+    const jwt = await request.jwtVerify<{ role?: string }>();
+    if (jwt.role !== "super_admin") throw app.httpErrors.forbidden("Only administrators can change settings");
+    const body = appSettingsSchema.parse(request.body);
+    const result = await pool.query(
+      `insert into app_settings (key, value, updated_at)
+       values ('settings', $1::jsonb, now())
+       on conflict (key) do update set value = excluded.value, updated_at = now()
+       returning value`,
+      [JSON.stringify(body)]
+    );
+    await pool.query("insert into audit_log (action, entity, detail) values ('settings.update', 'settings', 'Updated company and security settings')");
+    return normalizeSettings(result.rows[0].value);
+  });
+
   app.get("/users", async () => {
     const result = await pool.query(`
       select u.id, u.username, u.email, u.full_name as name, coalesce(ur.role_id, 'super_admin') as role,
@@ -138,6 +271,18 @@ export async function registerModuleRoutes(app: FastifyInstance) {
         [body.username, body.email, body.name, passwordHash]
       );
       await client.query("insert into user_roles (user_id, role_id) values ($1, $2) on conflict do nothing", [user.rows[0].id, body.role]);
+      const settings = await getSettings();
+      const invite = await client.query(
+        `insert into notifications (user_id, type, title, body)
+         values ($1, 'system', 'Your account is ready', $2)
+         returning id`,
+        [user.rows[0].id, `Username: ${body.username}. Temporary password: ${body.password}. Android: ${settings.downloads.androidUrl}. iOS: ${settings.downloads.iosUrl}.`]
+      );
+      await client.query(
+        `insert into notification_deliveries (notification_id, channel, recipient, status, error, sent_at)
+         values ($1, 'email', $2, $3, $4, case when $3 = 'sent' then now() else null end)`,
+        [invite.rows[0].id, body.email, config.smtpHost ? "sent" : "pending", config.smtpHost ? null : "SMTP is not configured; queued for email provider"]
+      );
       await client.query("insert into audit_log (action, entity, entity_id, detail) values ('user.create', 'user', $1, $2)", [user.rows[0].id, `Created ${body.username}`]);
       await client.query("commit");
       return { ...user.rows[0], role: body.role, twoFactorEnabled: false };
@@ -216,6 +361,13 @@ export async function registerModuleRoutes(app: FastifyInstance) {
     return result.rows;
   });
 
+  app.post("/sessions/:id/revoke", async (request) => {
+    const params = idParam.parse(request.params);
+    await pool.query("update sessions set revoked_at = now() where id = $1 and revoked_at is null", [params.id]);
+    await pool.query("insert into audit_log (action, entity, entity_id, detail) values ('session.revoke', 'session', $1, 'Revoked user session')", [params.id]);
+    return { ok: true };
+  });
+
   app.post("/auth/2fa/setup", async (request) => {
     const body = z.object({ userId: z.string().uuid() }).parse(request.body);
     const secret = `BLEX-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
@@ -230,6 +382,7 @@ export async function registerModuleRoutes(app: FastifyInstance) {
   });
 
   app.get("/inventory", async () => {
+    await ensureLowStockNotifications();
     const result = await pool.query(`
       select p.id as "productId", p.name as "productName", p.sku, p.unit, p.reorder_qty as reorder,
              o.id as "outletId", o.name as "outletName", coalesce(sl.quantity, 0) as quantity,
@@ -317,6 +470,11 @@ export async function registerModuleRoutes(app: FastifyInstance) {
     return result.rows.map((x) => ({ ...x, qty: numberify(x.qty), unitCost: numberify(x.unitCost) }));
   });
 
+  app.get("/outlets", async () => {
+    const result = await pool.query("select id, code, name, type, address from outlets order by name");
+    return result.rows;
+  });
+
   app.post("/inventory/adjustments", async (request) => {
     const body = z.object({
       productId: z.string().uuid(),
@@ -336,7 +494,9 @@ export async function registerModuleRoutes(app: FastifyInstance) {
         insert into stock_movements (product_id, outlet_id, movement, qty, note)
         values ($1, $2, $3, $4, $5)
       `, [body.productId, body.outletId, body.reason, body.qty, body.note ?? null]);
+      await client.query("insert into audit_log (action, entity, entity_id, detail) values ('inventory.adjust', 'inventory', $1, $2)", [body.productId, `${body.reason} ${body.qty}`]);
       await client.query("commit");
+      await ensureLowStockNotifications();
       return { ok: true };
     } catch (error) {
       await client.query("rollback");
