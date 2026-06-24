@@ -15,6 +15,7 @@
     "dev:web": "pnpm --filter @blex/mobile run web",
     "dev:desktop": "pnpm --filter @blex/desktop run dev",
     "build": "pnpm run build:shared && pnpm run build:api && pnpm run build:web && pnpm run build:desktop",
+    "build:vercel-api": "pnpm -w run build:shared && pnpm --filter @blex/api run build && node scripts/write-vercel-public-entry.mjs",
     "build:shared": "pnpm --filter @blex/shared run build",
     "build:api": "pnpm --filter @blex/api run build",
     "build:web": "pnpm --filter @blex/mobile run build:web",

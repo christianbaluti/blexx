@@ -1,16 +1,5 @@
 {
   "installCommand": "pnpm install --frozen-lockfile",
-  "buildCommand": "pnpm -w run build:shared && pnpm --filter @blex/api run build",
-  "builds": [
-    {
-      "src": "api/index.mjs",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "/api/index.mjs"
-    }
-  ]
+  "buildCommand": "pnpm -w run build:vercel-api",
+  "outputDirectory": "public"
 }

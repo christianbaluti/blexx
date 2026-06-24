@@ -21,6 +21,8 @@ apps/desktop/release/
 apps/desktop/release-build/
 backups/
 builds/
+public/server.mjs
+apps/api/public/server.mjs
 *.tsbuildinfo
 *.local
 .env
