@@ -17,6 +17,7 @@ export async function createApp() {
   await app.register(sensible);
   await app.register(jwt, { secret: config.jwtSecret });
 
+  app.get("/", async () => ({ ok: true, service: "blex-api" }));
   app.get("/health", async () => ({ ok: true, service: "blex-api" }));
 
   await registerAuthRoutes(app);
