@@ -1,8 +1,18 @@
 {
   "installCommand": "pnpm install --frozen-lockfile",
-  "buildCommand": "pnpm -w run build:shared && pnpm --filter @blex/api run build && mkdir -p public",
-  "outputDirectory": "public",
-  "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
+  "buildCommand": "pnpm -w run build:shared && pnpm --filter @blex/api run build",
+  "builds": [
+    {
+      "src": "api/index.mjs",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api/index.mjs"
+    }
+  ],
   "functions": {
     "api/index.mjs": {
       "maxDuration": 30
