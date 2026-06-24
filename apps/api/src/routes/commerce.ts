@@ -74,9 +74,8 @@ export async function registerCommerceRoutes(app: FastifyInstance) {
 
   app.get("/suppliers", async () => {
     const result = await pool.query(`
-      select id, name, phone, email, address, opening_balance as balance
+      select id, name, phone, email, address, note, opening_balance as balance, status
       from suppliers
-      where status = 'active'
       order by name
     `);
     return result.rows.map((x) => ({ ...x, balance: numberify(x.balance) }));
@@ -84,10 +83,9 @@ export async function registerCommerceRoutes(app: FastifyInstance) {
 
   app.get("/customers", async () => {
     const result = await pool.query(`
-      select id, name, phone, email, loyalty_points as "loyaltyPoints",
-             credit_limit as "creditLimit", opening_balance as balance
+      select id, name, phone, email, address, loyalty_points as "loyaltyPoints",
+             credit_limit as "creditLimit", opening_balance as balance, status
       from customers
-      where status = 'active'
       order by name
     `);
     return result.rows.map((x) => ({

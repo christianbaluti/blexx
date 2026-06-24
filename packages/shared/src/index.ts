@@ -73,7 +73,9 @@ export interface Supplier {
   phone: string | null;
   email: string | null;
   address: string | null;
+  note?: string | null;
   balance: number;
+  status?: "active" | "archived" | "draft" | "disabled";
 }
 
 export interface Customer {
@@ -81,9 +83,11 @@ export interface Customer {
   name: string;
   phone: string | null;
   email: string | null;
+  address?: string | null;
   loyaltyPoints: number;
   creditLimit: number;
   balance: number;
+  status?: "active" | "archived" | "draft" | "disabled";
 }
 
 export interface InventoryBatch {
@@ -167,9 +171,15 @@ export interface GoodsReceivedNote {
   id: Id;
   refNo: string;
   poId: Id | null;
+  supplierId?: Id | null;
+  supplierName?: string | null;
+  outletId?: Id | null;
+  outletName?: string | null;
   receivedAt: string;
   receivedBy: Id | null;
   totalItems: number;
+  total?: number;
+  note?: string | null;
 }
 
 export interface SupplierInvoice {
@@ -182,6 +192,11 @@ export interface SupplierInvoice {
   total: number;
   paid: number;
   status: "open" | "partial" | "paid" | "void";
+  grnId?: Id | null;
+  grnRefNo?: string | null;
+  attachmentName?: string | null;
+  attachmentMime?: string | null;
+  attachmentData?: string | null;
 }
 
 export interface Bom {

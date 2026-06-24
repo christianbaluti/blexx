@@ -39,6 +39,7 @@ const partySchema = z.object({
   phone: z.string().nullable().optional(),
   email: z.string().nullable().optional(),
   address: z.string().nullable().optional(),
+  note: z.string().nullable().optional(),
   openingBalance: z.number().default(0)
 });
 
@@ -743,20 +744,72 @@ export async function registerModuleRoutes(app: FastifyInstance) {
   app.get("/grn", async () => {
     const result = await pool.query(`
       select g.id, g.ref_no as "refNo", g.po_id as "poId", g.received_at as "receivedAt",
-             g.received_by as "receivedBy", coalesce(sum(gl.qty), 0) as "totalItems"
+             g.received_by as "receivedBy", g.supplier_id as "supplierId", s.name as "supplierName",
+             g.outlet_id as "outletId", o.name as "outletName", g.note,
+             coalesce(sum(gl.qty), 0) as "totalItems",
+             coalesce(sum(gl.qty * gl.unit_cost), 0) as total
       from grn g
+      left join suppliers s on s.id = g.supplier_id
+      left join outlets o on o.id = g.outlet_id
       left join grn_lines gl on gl.grn_id = g.id
-      group by g.id
+      group by g.id, s.name, o.name
       order by g.received_at desc
     `);
-    return result.rows.map((x) => ({ ...x, totalItems: numberify(x.totalItems) }));
+    return result.rows.map((x) => ({ ...x, totalItems: numberify(x.totalItems), total: numberify(x.total) }));
+  });
+
+  app.get("/grn/:id", async (request) => {
+    const params = idParam.parse(request.params);
+    const grn = await pool.query(`
+      select g.id, g.ref_no as "refNo", g.po_id as "poId", g.received_at as "receivedAt",
+             g.received_by as "receivedBy", g.supplier_id as "supplierId", s.name as "supplierName",
+             g.outlet_id as "outletId", o.name as "outletName", g.note
+      from grn g
+      left join suppliers s on s.id = g.supplier_id
+      left join outlets o on o.id = g.outlet_id
+      where g.id = $1
+    `, [params.id]);
+    if (!grn.rows[0]) throw app.httpErrors.notFound("GRN not found");
+    const lines = await pool.query(`
+      select gl.id, gl.product_id as "productId", p.name as "productName", gl.qty, gl.unit_cost as "unitCost",
+             gl.batch_no as "batchNo", gl.expiry_date as "expiryDate"
+      from grn_lines gl
+      join products p on p.id = gl.product_id
+      where gl.grn_id = $1
+      order by p.name
+    `, [params.id]);
+    const invoice = await pool.query("select id, ref_no as \"refNo\" from supplier_invoices where grn_id = $1 order by invoice_date desc limit 1", [params.id]);
+    return {
+      ...grn.rows[0],
+      lines: lines.rows.map((x) => ({ ...x, qty: numberify(x.qty), unitCost: numberify(x.unitCost) })),
+      invoice: invoice.rows[0] ?? null
+    };
+  });
+
+  app.get("/suppliers/:id/statement", async (request) => {
+    const params = idParam.parse(request.params);
+    const [supplier, purchaseOrders, invoices, grns, expenses] = await Promise.all([
+      pool.query("select id, name, phone, email, address, note, opening_balance as balance, status from suppliers where id = $1", [params.id]),
+      pool.query("select id, ref_no as \"refNo\", order_date as date, status, total from purchase_orders where supplier_id = $1 order by order_date desc", [params.id]),
+      pool.query("select id, ref_no as \"refNo\", invoice_date as \"invoiceDate\", due_date as \"dueDate\", total, paid, status, grn_id as \"grnId\", attachment_name as \"attachmentName\" from supplier_invoices where supplier_id = $1 order by invoice_date desc", [params.id]),
+      pool.query("select id, ref_no as \"refNo\", received_at as \"receivedAt\", outlet_id as \"outletId\", note from grn where supplier_id = $1 order by received_at desc", [params.id]),
+      pool.query("select id, expense_date as date, description, amount, due_date as \"dueDate\", recurring from expenses where description ilike $1 order by expense_date desc", [`%${params.id}%`])
+    ]);
+    if (!supplier.rows[0]) throw app.httpErrors.notFound("Supplier not found");
+    return {
+      supplier: { ...supplier.rows[0], balance: numberify(supplier.rows[0].balance) },
+      purchaseOrders: purchaseOrders.rows.map((x) => ({ ...x, total: numberify(x.total) })),
+      invoices: invoices.rows.map((x) => ({ ...x, total: numberify(x.total), paid: numberify(x.paid) })),
+      grns: grns.rows,
+      expenses: expenses.rows.map((x) => ({ ...x, amount: numberify(x.amount) }))
+    };
   });
 
   app.post("/suppliers", async (request) => {
     const body = partySchema.parse(request.body);
     const result = await pool.query(
-      "insert into suppliers (name, phone, email, address, opening_balance) values ($1,$2,$3,$4,$5) returning id",
-      [body.name, body.phone ?? null, body.email ?? null, body.address ?? null, body.openingBalance]
+      "insert into suppliers (name, phone, email, address, note, opening_balance) values ($1,$2,$3,$4,$5,$6) returning id",
+      [body.name, body.phone ?? null, body.email ?? null, body.address ?? null, body.note ?? null, body.openingBalance]
     );
     return { id: result.rows[0].id };
   });
@@ -766,9 +819,28 @@ export async function registerModuleRoutes(app: FastifyInstance) {
     const body = partySchema.partial().parse(request.body);
     await pool.query(
       `update suppliers set name = coalesce($2, name), phone = coalesce($3, phone), email = coalesce($4, email),
-       address = coalesce($5, address), opening_balance = coalesce($6, opening_balance), version = version + 1 where id = $1`,
-      [params.id, body.name ?? null, body.phone ?? null, body.email ?? null, body.address ?? null, body.openingBalance ?? null]
+       address = coalesce($5, address), note = coalesce($6, note), opening_balance = coalesce($7, opening_balance), version = version + 1 where id = $1`,
+      [params.id, body.name ?? null, body.phone ?? null, body.email ?? null, body.address ?? null, body.note ?? null, body.openingBalance ?? null]
     );
+    return { ok: true };
+  });
+
+  app.post("/suppliers/:id/suspend", async (request) => {
+    const params = idParam.parse(request.params);
+    await pool.query("update suppliers set status = 'archived', version = version + 1 where id = $1", [params.id]);
+    return { ok: true };
+  });
+
+  app.delete("/suppliers/:id", async (request) => {
+    const params = idParam.parse(request.params);
+    const linked = await pool.query(`
+      select
+        (select count(*) from purchase_orders where supplier_id = $1) +
+        (select count(*) from supplier_invoices where supplier_id = $1) +
+        (select count(*) from grn where supplier_id = $1) as total
+    `, [params.id]);
+    if (Number(linked.rows[0].total) > 0) throw app.httpErrors.conflict("Supplier is linked to activity; suspend it instead.");
+    await pool.query("delete from suppliers where id = $1", [params.id]);
     return { ok: true };
   });
 
@@ -791,6 +863,44 @@ export async function registerModuleRoutes(app: FastifyInstance) {
        version = version + 1 where id = $1`,
       [params.id, body.name ?? null, body.phone ?? null, body.email ?? null, body.address ?? null, body.loyaltyPoints ?? null, body.creditLimit ?? null, body.openingBalance ?? null]
     );
+    return { ok: true };
+  });
+
+  app.get("/customers/:id/statement", async (request) => {
+    const params = idParam.parse(request.params);
+    const [customer, sales, loyalty] = await Promise.all([
+      pool.query("select id, name, phone, email, address, loyalty_points as \"loyaltyPoints\", credit_limit as \"creditLimit\", opening_balance as balance, status from customers where id = $1", [params.id]),
+      pool.query("select id, ref_no as \"refNo\", sold_at as date, total, status from sales where customer_id = $1 order by sold_at desc", [params.id]),
+      pool.query("select id, points, ref_type as \"refType\", note, created_at as \"createdAt\" from loyalty_ledger where customer_id = $1 order by created_at desc", [params.id])
+    ]);
+    if (!customer.rows[0]) throw app.httpErrors.notFound("Customer not found");
+    return {
+      customer: { ...customer.rows[0], loyaltyPoints: Number(customer.rows[0].loyaltyPoints), creditLimit: numberify(customer.rows[0].creditLimit), balance: numberify(customer.rows[0].balance) },
+      sales: sales.rows.map((x) => ({ ...x, total: numberify(x.total) })),
+      loyalty: loyalty.rows
+    };
+  });
+
+  app.post("/customers/:id/payment", async (request) => {
+    const params = idParam.parse(request.params);
+    const body = z.object({ amount: z.number().positive(), note: z.string().optional() }).parse(request.body);
+    await pool.query("update customers set opening_balance = greatest(opening_balance - $2, 0) where id = $1", [params.id, body.amount]);
+    await pool.query("insert into audit_log (action, entity, entity_id, detail) values ('customer.payment', 'customer', $1, $2)", [params.id, body.note ?? `Customer payment ${body.amount}`]);
+    return { ok: true };
+  });
+
+  app.post("/customers/:id/suspend", async (request) => {
+    const params = idParam.parse(request.params);
+    await pool.query("update customers set status = 'archived' where id = $1", [params.id]);
+    return { ok: true };
+  });
+
+  app.delete("/customers/:id", async (request) => {
+    const params = idParam.parse(request.params);
+    const linked = await pool.query("select count(*) as total from sales where customer_id = $1", [params.id]);
+    if (Number(linked.rows[0].total) > 0) throw app.httpErrors.conflict("Customer is linked to activity; suspend it instead.");
+    await pool.query("delete from loyalty_ledger where customer_id = $1", [params.id]);
+    await pool.query("delete from customers where id = $1", [params.id]);
     return { ok: true };
   });
 
@@ -853,12 +963,13 @@ export async function registerModuleRoutes(app: FastifyInstance) {
       outletId: z.string().uuid(),
       receivedBy: z.string().uuid().nullable().optional(),
       supplierId: z.string().uuid().nullable().optional(),
+      note: z.string().nullable().optional(),
       lines: z.array(z.object({ productId: z.string().uuid(), qty: z.number().positive(), unitCost: z.number().nonnegative(), batchNo: z.string().nullable().optional(), expiryDate: z.string().nullable().optional() })).min(1)
     }).parse(request.body);
     const client = await pool.connect();
     try {
       await client.query("begin");
-      const grn = await client.query("insert into grn (ref_no, po_id, received_by) values ($1,$2,$3) returning id, ref_no", [`GRN-${Date.now()}`, body.poId ?? null, body.receivedBy ?? null]);
+      const grn = await client.query("insert into grn (ref_no, po_id, received_by, supplier_id, outlet_id, note) values ($1,$2,$3,$4,$5,$6) returning id, ref_no", [`GRN-${Date.now()}`, body.poId ?? null, body.receivedBy ?? null, body.supplierId ?? null, body.outletId, body.note ?? null]);
       for (const line of body.lines) {
         await client.query("insert into grn_lines (grn_id, product_id, qty, unit_cost, batch_no, expiry_date) values ($1,$2,$3,$4,$5,$6)", [grn.rows[0].id, line.productId, line.qty, line.unitCost, line.batchNo ?? null, line.expiryDate ?? null]);
         await client.query(`
@@ -941,12 +1052,75 @@ export async function registerModuleRoutes(app: FastifyInstance) {
   app.get("/supplier-invoices", async () => {
     const result = await pool.query(`
       select si.id, si.ref_no as "refNo", si.supplier_id as "supplierId", s.name as "supplierName",
-             si.invoice_date as "invoiceDate", si.due_date as "dueDate", si.total, si.paid, si.status
+             si.invoice_date as "invoiceDate", si.due_date as "dueDate", si.total, si.paid, si.status,
+             si.grn_id as "grnId", si.attachment_name as "attachmentName"
       from supplier_invoices si
       join suppliers s on s.id = si.supplier_id
       order by si.invoice_date desc
     `);
     return result.rows.map((x) => ({ ...x, total: numberify(x.total), paid: numberify(x.paid) }));
+  });
+
+  app.get("/supplier-invoices/:id", async (request) => {
+    const params = idParam.parse(request.params);
+    const invoice = await pool.query(`
+      select si.id, si.ref_no as "refNo", si.supplier_id as "supplierId", s.name as "supplierName",
+             si.invoice_date as "invoiceDate", si.due_date as "dueDate", si.total, si.paid, si.status,
+             si.grn_id as "grnId", g.ref_no as "grnRefNo", si.attachment_name as "attachmentName",
+             si.attachment_mime as "attachmentMime", si.attachment_data as "attachmentData"
+      from supplier_invoices si
+      join suppliers s on s.id = si.supplier_id
+      left join grn g on g.id = si.grn_id
+      where si.id = $1
+    `, [params.id]);
+    if (!invoice.rows[0]) throw app.httpErrors.notFound("Invoice not found");
+    const expenses = await pool.query("select id, expense_date as date, due_date as \"dueDate\", description, amount from expenses where description ilike $1 order by expense_date desc", [`%${params.id}%`]);
+    return { ...invoice.rows[0], total: numberify(invoice.rows[0].total), paid: numberify(invoice.rows[0].paid), expenses: expenses.rows.map((x) => ({ ...x, amount: numberify(x.amount) })) };
+  });
+
+  app.post("/supplier-invoices", async (request) => {
+    const body = z.object({
+      supplierId: z.string().uuid(),
+      invoiceDate: z.string().default(() => new Date().toISOString().slice(0, 10)),
+      dueDate: z.string().nullable().optional(),
+      total: z.number().nonnegative(),
+      paid: z.number().nonnegative().default(0),
+      grnId: z.string().uuid().nullable().optional(),
+      attachmentName: z.string().nullable().optional(),
+      attachmentMime: z.string().nullable().optional(),
+      attachmentData: z.string().max(2_500_000).nullable().optional()
+    }).parse(request.body);
+    const result = await pool.query(
+      `insert into supplier_invoices (ref_no, supplier_id, invoice_date, due_date, total, paid, status, grn_id, attachment_name, attachment_mime, attachment_data)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       returning id, ref_no`,
+      [`INV-${Date.now()}`, body.supplierId, body.invoiceDate, body.dueDate ?? null, body.total, body.paid, body.paid >= body.total ? "paid" : body.paid > 0 ? "partial" : "open", body.grnId ?? null, body.attachmentName ?? null, body.attachmentMime ?? null, body.attachmentData ?? null]
+    );
+    return { id: result.rows[0].id, refNo: result.rows[0].ref_no };
+  });
+
+  app.patch("/supplier-invoices/:id", async (request) => {
+    const params = idParam.parse(request.params);
+    const body = z.object({
+      dueDate: z.string().nullable().optional(),
+      total: z.number().nonnegative().optional(),
+      paid: z.number().nonnegative().optional(),
+      status: z.enum(["open", "partial", "paid", "void"]).optional()
+    }).parse(request.body);
+    await pool.query(
+      `update supplier_invoices set due_date = coalesce($2, due_date), total = coalesce($3, total),
+       paid = coalesce($4, paid), status = coalesce($5, status) where id = $1`,
+      [params.id, body.dueDate ?? null, body.total ?? null, body.paid ?? null, body.status ?? null]
+    );
+    return { ok: true };
+  });
+
+  app.delete("/supplier-invoices/:id", async (request) => {
+    const params = idParam.parse(request.params);
+    const linked = await pool.query("select count(*) as total from expenses where description ilike $1", [`%${params.id}%`]);
+    if (Number(linked.rows[0].total) > 0) throw app.httpErrors.conflict("Invoice has payment activity; void it instead.");
+    await pool.query("delete from supplier_invoices where id = $1", [params.id]);
+    return { ok: true };
   });
 
   app.get("/loyalty", async () => {

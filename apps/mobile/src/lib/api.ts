@@ -222,14 +222,59 @@ export const api = {
   createSupplier(payload: Record<string, unknown>) {
     return request<{ id: string }>("/suppliers", { method: "POST", body: JSON.stringify(payload) });
   },
+  updateSupplier(id: string, payload: Record<string, unknown>) {
+    return request<{ ok: boolean }>(`/suppliers/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+  },
+  deleteSupplier(id: string) {
+    return request<{ ok: boolean }>(`/suppliers/${id}`, { method: "DELETE" });
+  },
+  suspendSupplier(id: string) {
+    return request<{ ok: boolean }>(`/suppliers/${id}/suspend`, { method: "POST" });
+  },
+  supplierStatement(id: string) {
+    return request<Record<string, unknown>>(`/suppliers/${id}/statement`);
+  },
   createCustomer(payload: Record<string, unknown>) {
     return request<{ id: string }>("/customers", { method: "POST", body: JSON.stringify(payload) });
+  },
+  updateCustomer(id: string, payload: Record<string, unknown>) {
+    return request<{ ok: boolean }>(`/customers/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+  },
+  deleteCustomer(id: string) {
+    return request<{ ok: boolean }>(`/customers/${id}`, { method: "DELETE" });
+  },
+  suspendCustomer(id: string) {
+    return request<{ ok: boolean }>(`/customers/${id}/suspend`, { method: "POST" });
+  },
+  customerStatement(id: string) {
+    return request<Record<string, unknown>>(`/customers/${id}/statement`);
+  },
+  recordCustomerPayment(id: string, payload: Record<string, unknown>) {
+    return request<{ ok: boolean }>(`/customers/${id}/payment`, { method: "POST", body: JSON.stringify(payload) });
   },
   createExpense(payload: Record<string, unknown>) {
     return request<{ id: string }>("/expenses", { method: "POST", body: JSON.stringify(payload) });
   },
   createPurchaseOrder(payload: Record<string, unknown>) {
     return request<{ id: string; refNo: string }>("/purchase-orders", { method: "POST", body: JSON.stringify(payload) });
+  },
+  createGrn(payload: Record<string, unknown>) {
+    return request<{ id: string; refNo: string }>("/grn", { method: "POST", body: JSON.stringify(payload) });
+  },
+  grnDetail(id: string) {
+    return request<Record<string, unknown>>(`/grn/${id}`);
+  },
+  createSupplierInvoice(payload: Record<string, unknown>) {
+    return request<{ id: string; refNo: string }>("/supplier-invoices", { method: "POST", body: JSON.stringify(payload) });
+  },
+  updateSupplierInvoice(id: string, payload: Record<string, unknown>) {
+    return request<{ ok: boolean }>(`/supplier-invoices/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+  },
+  deleteSupplierInvoice(id: string) {
+    return request<{ ok: boolean }>(`/supplier-invoices/${id}`, { method: "DELETE" });
+  },
+  supplierInvoiceDetail(id: string) {
+    return request<Record<string, unknown>>(`/supplier-invoices/${id}`);
   },
   createReturn(payload: Record<string, unknown>) {
     return request<{ id: string }>("/returns", { method: "POST", body: JSON.stringify(payload) });
