@@ -1,13 +1,10 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router, Slot, usePathname } from "expo-router";
 import { useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BrandLockup, StartupScreen } from "./brand";
-import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { useSyncEngine } from "../lib/syncEngine";
 import { colors, typography } from "../lib/theme";
 
 type NavItem = {
@@ -20,40 +17,35 @@ const sections: { title: string; items: NavItem[] }[] = [
   { title: "Overview", items: [
     { label: "Dashboard", route: "/dashboard", icon: "view-dashboard-outline" },
     { label: "POS", route: "/pos", icon: "barcode-scan" },
-    { label: "Receipts", route: "/receipts", icon: "receipt" },
-    { label: "Returns", route: "/returns", icon: "backup-restore" },
-    { label: "Sync Center", route: "/sync", icon: "sync" }
+    { label: "Receipts", route: "/receipts", icon: "receipt" }
   ] },
-  { title: "Operations", items: [
-    { label: "Products", route: "/products", icon: "tag-multiple-outline" },
-    { label: "Inventory", route: "/inventory", icon: "warehouse" },
-    { label: "Stock Counts", route: "/stock-counts", icon: "clipboard-check-outline" },
-    { label: "Transfers", route: "/transfers", icon: "swap-horizontal" },
-    { label: "Production", route: "/production", icon: "factory" },
-    { label: "BOMs", route: "/boms", icon: "file-tree-outline" },
-    { label: "Purchases", route: "/purchases", icon: "cart-arrow-down" }
-  ] },
-  { title: "People", items: [
+  { title: "Purchasing", items: [
     { label: "Suppliers", route: "/suppliers", icon: "truck-outline" },
-    { label: "Supplier Invoices", route: "/supplier-invoices", icon: "file-document-outline" },
+    { label: "Purchases", route: "/purchases", icon: "cart-arrow-down" },
     { label: "GRNs", route: "/grn", icon: "package-variant-closed-check" },
+    { label: "Supplier Invoices", route: "/supplier-invoices", icon: "file-document-outline" }
+  ] },
+  { title: "Inventory", items: [
+    { label: "Raw Materials", route: "/items", icon: "beaker-outline" },
+    { label: "Finished Products", route: "/products", icon: "tag-multiple-outline" },
+    { label: "Product Blueprints", route: "/boms", icon: "file-tree-outline" },
+    { label: "Production", route: "/production", icon: "factory" },
+    { label: "Warehouse Stock", route: "/inventory", icon: "warehouse" },
+    { label: "Shop Stock", route: "/transfers", icon: "storefront-outline" },
+    { label: "Stock Transfers", route: "/transfers", icon: "swap-horizontal" }
+  ] },
+  { title: "Sales", items: [
     { label: "Customers", route: "/customers", icon: "account-group-outline" },
-    { label: "Loyalty", route: "/loyalty", icon: "star-circle-outline" },
-    { label: "Credit", route: "/credit", icon: "credit-card-outline" }
+    { label: "POS Sales", route: "/pos", icon: "cart-check" },
+    { label: "Receipts", route: "/receipts", icon: "receipt-text-outline" }
   ] },
   { title: "Finance", items: [
     { label: "Finance", route: "/finance", icon: "finance" },
-    { label: "Expenses", route: "/expenses", icon: "receipt-text-outline" },
     { label: "Reports", route: "/reports", icon: "chart-box-outline" }
   ] },
   { title: "Admin", items: [
-    { label: "Notifications", route: "/notifications", icon: "bell-outline" },
-    { label: "Audit Trail", route: "/audit", icon: "shield-search" },
     { label: "Users/Roles", route: "/users", icon: "account-key-outline" },
-    { label: "Permissions", route: "/permissions", icon: "key-chain" },
-    { label: "Sessions", route: "/sessions", icon: "monitor-account" },
-    { label: "Settings", route: "/settings", icon: "cog-outline" },
-    { label: "Account", route: "/account", icon: "account-circle-outline" }
+    { label: "Settings", route: "/settings", icon: "cog-outline" }
   ] }
 ];
 
@@ -67,9 +59,7 @@ export function AppShell() {
   const isCompact = width < 820;
   const compactTopInset = isCompact ? Math.max(insets.top, 54) : 0;
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const auth = useAuth();
-  const sync = useSyncEngine();
   const pathname = usePathname().replace("/(tabs)", "");
 
   if (auth.loading) return <StartupScreen label="Restoring your secure session" />;
@@ -97,11 +87,6 @@ export function AppShell() {
               <TextInput placeholder="Search products, sales, customers" placeholderTextColor={colors.muted} style={styles.searchInput} />
             </View>
           ) : null}
-          <Pressable style={styles.iconButton} onPress={() => setNotificationsOpen(true)}>
-            <MaterialCommunityIcons name="bell-outline" size={20} color={colors.ink} />
-            <NotificationDot />
-          </Pressable>
-          <SyncPill status={sync.status} pending={sync.summary.pending} conflicts={sync.summary.conflicts} />
         </View>
         <Slot />
       </View>
@@ -110,58 +95,7 @@ export function AppShell() {
           <Pressable style={styles.drawer}>{nav}</Pressable>
         </Pressable>
       </Modal>
-      <NotificationModal visible={notificationsOpen} onClose={() => setNotificationsOpen(false)} />
     </View>
-  );
-}
-
-function NotificationDot() {
-  const { data = [] } = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, refetchInterval: 60_000 });
-  const unread = data.filter((item) => !item.read).length;
-  if (!unread) return null;
-  return <View style={styles.notificationDot}><Text style={styles.notificationDotText}>{unread > 9 ? "9+" : unread}</Text></View>;
-}
-
-function NotificationModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
-  const queryClient = useQueryClient();
-  const { data = [] } = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, enabled: visible });
-  const markRead = useMutation({
-    mutationFn: api.markNotificationRead,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] })
-  });
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose}>
-        <Pressable style={styles.notificationPanel}>
-          <View style={styles.notificationHeader}>
-            <Text style={styles.notificationTitle}>Notifications</Text>
-            <Pressable style={styles.logoutButton} onPress={onClose}>
-              <MaterialCommunityIcons name="close" size={18} color={colors.ink} />
-            </Pressable>
-          </View>
-          <ScrollView contentContainerStyle={styles.notificationList}>
-            {data.map((item) => (
-              <Pressable
-                key={item.id}
-                style={[styles.notificationItem, !item.read && styles.notificationItemUnread]}
-                onPress={() => markRead.mutate(item.id)}
-              >
-                <Text style={styles.notificationItemTitle}>{item.title}</Text>
-                <Text style={styles.notificationBody}>{item.body ?? ""}</Text>
-                <Text style={styles.notificationMeta}>{new Date(item.ts).toLocaleString()} - {item.channel ?? "in_app"} - {item.status ?? "pending"}</Text>
-              </Pressable>
-            ))}
-            {!data.length ? <Text style={styles.notificationBody}>No notifications for your account.</Text> : null}
-          </ScrollView>
-          <Pressable style={styles.viewAllButton} onPress={() => {
-            onClose();
-            router.push("/notifications" as never);
-          }}>
-            <Text style={styles.viewAllText}>Open notifications page</Text>
-          </Pressable>
-        </Pressable>
-      </Pressable>
-    </Modal>
   );
 }
 
@@ -209,17 +143,6 @@ function Navigation({ onNavigate }: { onNavigate: () => void }) {
           <MaterialCommunityIcons name="logout" size={16} color={colors.sidebarMuted} />
         </Pressable>
       </View>
-    </View>
-  );
-}
-
-function SyncPill({ status, pending, conflicts }: { status: string; pending: number; conflicts: number }) {
-  const tone = status === "online" ? colors.success : status === "offline" ? colors.muted : status === "conflicts" ? colors.danger : colors.warning;
-  const label = status === "online" ? "Online" : status === "offline" ? "Offline" : status === "syncing" ? "Syncing" : status === "conflicts" ? `${conflicts} conflicts` : `${pending} pending`;
-  return (
-    <View style={[styles.syncPill, { borderColor: tone }]}>
-      <View style={[styles.syncDot, { backgroundColor: tone }]} />
-      <Text style={[styles.syncText, { color: tone }]} numberOfLines={1}>{label}</Text>
     </View>
   );
 }

@@ -8,7 +8,7 @@ import { Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
-type PurchaseTab = "po" | "grn" | "inv" | "ret";
+type PurchaseTab = "po" | "grn" | "inv";
 
 function statusTone(status: string) {
   if (["received", "paid", "closed"].includes(status)) return "success" as const;
@@ -22,7 +22,6 @@ export default function Purchases() {
   const { data: purchaseOrders = [] } = useQuery({ queryKey: ["purchase-orders"], queryFn: api.purchaseOrders });
   const { data: grn = [] } = useQuery({ queryKey: ["grn"], queryFn: api.grn });
   const { data: invoices = [] } = useQuery({ queryKey: ["supplier-invoices"], queryFn: api.supplierInvoices });
-  const { data: returns = [] } = useQuery({ queryKey: ["returns"], queryFn: api.returns });
   const openPayables = invoices.reduce((sum, invoice) => sum + Math.max(0, invoice.total - invoice.paid), 0);
 
   return (
@@ -31,7 +30,7 @@ export default function Purchases() {
         <PageHeader
           eyebrow="Operations"
           title="Purchases"
-          description="Purchase orders, goods received notes, supplier invoices and supplier returns."
+          description="Purchase orders, goods received notes and supplier invoices."
           actions={<CommandButton icon="plus" label="New PO" primary />}
         />
         <View style={styles.metrics}>
@@ -46,8 +45,7 @@ export default function Purchases() {
           tabs={[
             { key: "po", label: "Purchase orders" },
             { key: "grn", label: "Goods received" },
-            { key: "inv", label: "Supplier invoices" },
-            { key: "ret", label: "Returns" }
+            { key: "inv", label: "Supplier invoices" }
           ]}
         />
 
@@ -102,21 +100,6 @@ export default function Purchases() {
           ) : <EmptyPanel icon="file-document-outline" title="No supplier invoices yet" body="Supplier invoices are created from received purchase documents." />
         ) : null}
 
-        {tab === "ret" ? (
-          returns.length ? (
-            <TableCard>
-              <TableHeader columns={["Return", "Reason", "Status", "Created"]} />
-              {returns.map((item, index) => (
-                <View key={String(item.id ?? index)} style={styles.row}>
-                  <Text style={styles.monoCell}>{String(item.refNo ?? item.id ?? "RET")}</Text>
-                  <Text style={styles.cellText}>{String(item.reason ?? "Supplier return")}</Text>
-                  <View style={styles.cell}><Badge tone="warning">{String(item.status ?? "open")}</Badge></View>
-                  <Text style={styles.mutedText}>{String(item.createdAt ?? item.date ?? "-")}</Text>
-                </View>
-              ))}
-            </TableCard>
-          ) : <EmptyPanel icon="backup-restore" title="No supplier returns yet" body="Damaged or rejected supplier items will show here." action={<CommandButton icon="plus" label="New return" primary />} />
-        ) : null}
       </ScrollView>
     </Screen>
   );

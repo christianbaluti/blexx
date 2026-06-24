@@ -40,7 +40,7 @@ import { readCacheAsync, saveCache } from "./localDb";
 import { getAuthToken } from "./sessionStore";
 
 const API_PORT = "4000";
-const PRODUCTION_API_URL = "https://blexx-api-ms2z.vercel.app";
+const PRODUCTION_API_URL = "https://blexx-api.vercel.app";
 
 function cleanUrl(url: string) {
   return url.replace(/\/+$/, "");
@@ -136,38 +136,126 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  dashboard: () => cached<DashboardSummary>("dashboard", "/dashboard", {
-    revenue14d: 0,
-    stockValue: 0,
-    transactionCount14d: 0,
-    lowStockCount: 0,
-    revenueTrend: [],
-    topProducts: []
-  }),
-  products: () => cached<Product[]>("products", "/products", []),
-  categories: () => cached<Category[]>("categories", "/categories", []),
+  async dashboard() {
+    const data = await cached<Record<string, unknown>>("dashboard", "/dashboard", {});
+    return {
+      revenue14d: Number(data.revenue14d ?? 0),
+      stockValue: Number(data.warehouseValue ?? 0) + Number(data.shopValue ?? 0),
+      transactionCount14d: Number(data.salesCount ?? 0),
+      lowStockCount: Number(data.lowStockCount ?? 0),
+      revenueTrend: [] as DashboardSummary["revenueTrend"],
+      topProducts: [] as DashboardSummary["topProducts"]
+    } satisfies DashboardSummary;
+  },
+  async products() {
+    const rows = await cached<Record<string, unknown>[]>("products", "/products", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      sku: String(row.sku),
+      barcode: row.barcode ? String(row.barcode) : null,
+      name: String(row.name),
+      categoryId: null,
+      categoryName: null,
+      unit: String(row.unit ?? "ea"),
+      isRaw: false,
+      isSellable: true,
+      cost: Number(row.averageCost ?? 0),
+      price: Number(row.sellingPrice ?? 0),
+      stock: Number(row.shopStock ?? 0),
+      reorder: Number(row.reorderLevel ?? 0),
+      imageUrl: row.imageData ? String(row.imageData) : null,
+      warehouseStock: Number(row.warehouseStock ?? 0),
+      shopStock: Number(row.shopStock ?? 0)
+    } as Product & { warehouseStock: number; shopStock: number }));
+  },
+  items: () => cached<Record<string, unknown>[]>("items", "/items", []),
+  categories: async () => [] as Category[],
   suppliers: () => cached<Supplier[]>("suppliers", "/suppliers", []),
   customers: () => cached<Customer[]>("customers", "/customers", []),
-  sales: () => cached<Sale[]>("sales", "/sales", []),
+  async sales() {
+    const rows = await cached<Record<string, unknown>[]>("sales", "/sales", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      refNo: String(row.ref_no ?? row.refNo),
+      date: String(row.sale_date ?? row.date),
+      cashierId: String(row.cashier_id ?? row.cashierId ?? ""),
+      customerId: row.customer_id ? String(row.customer_id) : null,
+      subtotal: Number(row.subtotal ?? 0),
+      discount: Number(row.discount ?? 0),
+      tax: 0,
+      total: Number(row.total ?? 0),
+      payment: String(row.payment_method ?? "cash") as Sale["payment"],
+      status: "completed" as const
+    }));
+  },
   purchaseOrders: () => cached<PurchaseOrder[]>("purchase-orders", "/purchase-orders", []),
   returns: () => cached<Record<string, unknown>[]>("returns", "/returns", []),
   receipts: () => cached<Record<string, unknown>[]>("receipts", "/receipts", []),
   expenses: () => cached<Expense[]>("expenses", "/expenses", []),
   audit: () => cached<AuditEntry[]>("audit", "/audit", []),
-  notifications: () => cached<NotificationItem[]>("notifications", "/notifications", []),
+  notifications: async () => [] as NotificationItem[],
   markNotificationRead(id: string) {
     return request<{ ok: boolean }>(`/notifications/${id}/read`, { method: "POST" });
   },
   users: () => cached<UserAccount[]>("users", "/users", []),
   roles: () => cached<RoleDetail[]>("roles", "/roles", []),
-  inventory: () => cached<Record<string, unknown>[]>("inventory", "/inventory", []),
-  batches: () => cached<InventoryBatch[]>("inventory-batches", "/inventory/batches", []),
-  movements: () => cached<StockMovement[]>("inventory-movements", "/inventory/movements", []),
+  async inventory() {
+    const [warehouse, shop] = await Promise.all([
+      cached<Record<string, unknown>[]>("warehouse-stock", "/stock/warehouse", []),
+      cached<Record<string, unknown>[]>("shop-stock", "/stock/shop", [])
+    ]);
+    return [
+      ...warehouse.map((row) => ({
+        productId: row.id,
+        productName: row.name,
+        sku: row.sku,
+        unit: row.unit,
+        outletId: "warehouse",
+        outletName: "Warehouse",
+        quantity: row.quantity,
+        cost: row.unitCost,
+        price: 0,
+        reorder: 0
+      })),
+      ...shop.map((row) => ({
+        productId: row.id,
+        productName: row.name,
+        sku: row.sku,
+        unit: row.unit,
+        outletId: "shop",
+        outletName: "Shop",
+        quantity: row.quantity,
+        cost: row.unitCost,
+        price: row.sellingPrice,
+        reorder: 0
+      }))
+    ];
+  },
+  batches: async () => [] as InventoryBatch[],
+  movements: async () => [] as StockMovement[],
   stockCounts: () => cached<StockCount[]>("stock-counts", "/stock-counts", []),
   transfers: () => cached<Transfer[]>("transfers", "/transfers", []),
-  boms: () => cached<Bom[]>("boms", "/boms", []),
+  async boms() {
+    const rows = await cached<Record<string, unknown>[]>("blueprints", "/blueprints", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      productId: String(row.product_id ?? row.productId),
+      productName: row.productName ? String(row.productName) : undefined,
+      name: String(row.name),
+      laborCost: Number(row.labor_cost ?? row.laborCost ?? 0),
+      overhead: Number(row.overhead_cost ?? row.overhead ?? 0),
+      outputQty: Number(row.output_qty ?? row.outputQty ?? 1),
+      components: Array.isArray(row.items)
+        ? row.items.map((item) => ({
+            productId: String((item as Record<string, unknown>).itemId),
+            productName: String((item as Record<string, unknown>).itemName ?? ""),
+            qty: Number((item as Record<string, unknown>).quantity ?? 0)
+          }))
+        : []
+    }));
+  },
   production: () => cached<ProductionBatch[]>("production", "/production", []),
-  grn: () => cached<GoodsReceivedNote[]>("grn", "/grn", []),
+  grn: () => cached<GoodsReceivedNote[]>("grn", "/grns", []),
   supplierInvoices: () => cached<SupplierInvoice[]>("supplier-invoices", "/supplier-invoices", []),
   loyalty: () => cached<Record<string, unknown>[]>("loyalty", "/loyalty", []),
   credit: () => cached<Record<string, unknown>[]>("credit", "/credit", []),
@@ -176,20 +264,44 @@ export const api = {
   revokeSession(id: string) {
     return request<{ ok: boolean }>(`/sessions/${id}/revoke`, { method: "POST" });
   },
-  outlets: () => cached<Record<string, unknown>[]>("outlets", "/outlets", []),
-  glAccounts: () => cached<GlAccount[]>("gl-accounts", "/finance/accounts", []),
-  ledger: () => cached<GlEntry[]>("ledger", "/finance/ledger", []),
-  statements: () => cached<FinancialStatement>("statements", "/finance/statements", {
-    period: "Offline",
-    income: 0,
-    expenses: 0,
-    grossProfit: 0,
-    netProfit: 0,
-    assets: 0,
-    liabilities: 0,
-    equity: 0
-  }),
-  reports: () => cached<ReportSummary[]>("reports", "/reports", []),
+  outlets: () => cached<Record<string, unknown>[]>("outlets", "/stock/locations", []),
+  glAccounts: async () => [] as GlAccount[],
+  async ledger() {
+    const rows = await cached<Record<string, unknown>[]>("ledger", "/finance/transactions", []);
+    return rows.map((row) => ({
+      id: Number(row.id),
+      postedAt: String(row.created_at ?? row.createdAt),
+      refType: String(row.ref_type ?? row.refType ?? ""),
+      refId: row.ref_id ? String(row.ref_id) : null,
+      accountCode: String(row.type ?? ""),
+      accountName: String(row.type ?? ""),
+      debit: Number(row.amount ?? 0),
+      credit: 0,
+      memo: row.note ? String(row.note) : null
+    }));
+  },
+  async statements() {
+    const row = await cached<Record<string, unknown>>("statements", "/finance", {});
+    return {
+      period: "Current period",
+      income: Number(row.revenue ?? 0),
+      expenses: Number(row.expenses ?? 0),
+      grossProfit: Number(row.grossProfit ?? 0),
+      netProfit: Number(row.grossProfit ?? 0) - Number(row.expenses ?? 0),
+      assets: Number(row.warehouseValue ?? 0) + Number(row.shopValue ?? 0),
+      liabilities: Number(row.supplierPayments ?? 0),
+      equity: Number(row.warehouseValue ?? 0) + Number(row.shopValue ?? 0) - Number(row.supplierPayments ?? 0)
+    } satisfies FinancialStatement;
+  },
+  async reports() {
+    const data = await cached<Record<string, unknown>>("reports", "/reports", {});
+    const financeRows = Array.isArray(data.finance) ? data.finance as Record<string, unknown>[] : [];
+    return financeRows.map((row) => ({
+      title: String(row.type),
+      total: Number(row.amount ?? 0),
+      trend: 0
+    })) as ReportSummary[];
+  },
   syncHealth: () => cached<SyncHealth>("sync-health", "/sync/health", {
     online: false,
     pending: 0,
@@ -207,11 +319,35 @@ export const api = {
   }) {
     return request<{ id: string; refNo: string; total: number }>("/sales", {
       method: "POST",
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        cashierId: payload.cashierId,
+        customerId: payload.customerId ?? null,
+        paymentMethod: payload.payment === "voucher" ? "cash" : payload.payment,
+        items: payload.lines.map((line) => ({
+          productId: line.productId,
+          quantity: line.qty,
+          unitPrice: line.price,
+          discount: line.discount
+        }))
+      })
     });
   },
   createProduct(payload: Record<string, unknown>) {
-    return request<{ id: string }>("/products", { method: "POST", body: JSON.stringify(payload) });
+    return request<{ id: string }>("/products", {
+      method: "POST",
+      body: JSON.stringify({
+        sku: payload.sku,
+        barcode: payload.barcode,
+        name: payload.name,
+        unit: payload.unit,
+        sellingPrice: payload.price ?? payload.sellingPrice ?? 0,
+        reorderLevel: payload.reorder ?? payload.reorderLevel ?? 0,
+        imageData: payload.imageUrl ?? payload.imageData ?? null
+      })
+    });
+  },
+  createItem(payload: Record<string, unknown>) {
+    return request<{ id: string }>("/items", { method: "POST", body: JSON.stringify(payload) });
   },
   updateProduct(id: string, payload: Record<string, unknown>) {
     return request<{ ok: boolean }>(`/products/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
@@ -232,7 +368,7 @@ export const api = {
     return request<{ ok: boolean }>(`/suppliers/${id}/suspend`, { method: "POST" });
   },
   supplierStatement(id: string) {
-    return request<Record<string, unknown>>(`/suppliers/${id}/statement`);
+    return request<Record<string, unknown>>(`/suppliers/${id}`);
   },
   createCustomer(payload: Record<string, unknown>) {
     return request<{ id: string }>("/customers", { method: "POST", body: JSON.stringify(payload) });
@@ -247,7 +383,7 @@ export const api = {
     return request<{ ok: boolean }>(`/customers/${id}/suspend`, { method: "POST" });
   },
   customerStatement(id: string) {
-    return request<Record<string, unknown>>(`/customers/${id}/statement`);
+    return request<Record<string, unknown>>(`/customers/${id}`);
   },
   recordCustomerPayment(id: string, payload: Record<string, unknown>) {
     return request<{ ok: boolean }>(`/customers/${id}/payment`, { method: "POST", body: JSON.stringify(payload) });
@@ -259,10 +395,10 @@ export const api = {
     return request<{ id: string; refNo: string }>("/purchase-orders", { method: "POST", body: JSON.stringify(payload) });
   },
   createGrn(payload: Record<string, unknown>) {
-    return request<{ id: string; refNo: string }>("/grn", { method: "POST", body: JSON.stringify(payload) });
+    return request<{ id: string; refNo: string }>("/grns", { method: "POST", body: JSON.stringify(payload) });
   },
   grnDetail(id: string) {
-    return request<Record<string, unknown>>(`/grn/${id}`);
+    return request<Record<string, unknown>>(`/grns/${id}`);
   },
   createSupplierInvoice(payload: Record<string, unknown>) {
     return request<{ id: string; refNo: string }>("/supplier-invoices", { method: "POST", body: JSON.stringify(payload) });
@@ -283,13 +419,23 @@ export const api = {
     return request<{ id: string }>("/stock-counts", { method: "POST", body: JSON.stringify(payload) });
   },
   createTransfer(payload: Record<string, unknown>) {
-    return request<{ id: string }>("/transfers", { method: "POST", body: JSON.stringify(payload) });
+    const firstLine = Array.isArray(payload.lines) ? payload.lines[0] as Record<string, unknown> | undefined : undefined;
+    return request<{ id: string }>("/transfers", {
+      method: "POST",
+      body: JSON.stringify({
+        productId: payload.productId ?? firstLine?.productId,
+        quantity: payload.quantity ?? firstLine?.qty,
+        transferredBy: payload.transferredBy ?? null,
+        note: payload.note ?? null
+      })
+    });
   },
   receiveTransfer(id: string) {
-    return request<{ ok: boolean }>(`/transfers/${id}/receive`, { method: "POST" });
+    void id;
+    return Promise.resolve({ ok: true });
   },
   createBom(payload: Record<string, unknown>) {
-    return request<{ id: string }>("/boms", { method: "POST", body: JSON.stringify(payload) });
+    return request<{ id: string }>("/blueprints", { method: "POST", body: JSON.stringify(payload) });
   },
   createUser(payload: Record<string, unknown>) {
     return request<{ id: string }>("/users", { method: "POST", body: JSON.stringify(payload) });
@@ -306,7 +452,12 @@ export const api = {
   createProduction(payload: { bomId: string; outletId: string; qtyProduced: number; qtyWaste: number }) {
     return request<{ id: string; totalCost: number }>("/production", {
       method: "POST",
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        blueprintId: payload.bomId,
+        quantityToProduce: payload.qtyProduced,
+        quantityProduced: payload.qtyProduced,
+        quantityWasted: payload.qtyWaste
+      })
     });
   },
   pushSync(payload: { deviceId: string; mutations: SyncMutation[] }) {

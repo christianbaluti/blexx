@@ -23,7 +23,7 @@ export default function Grn() {
   const { data: grns = [] } = useQuery({ queryKey: ["grn"], queryFn: api.grn });
   const { data: suppliers = [] } = useQuery({ queryKey: ["suppliers"], queryFn: api.suppliers });
   const { data: outlets = [] } = useQuery({ queryKey: ["outlets"], queryFn: api.outlets });
-  const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products });
+  const { data: items = [] } = useQuery({ queryKey: ["items"], queryFn: api.items });
   const detail = useQuery({ queryKey: ["grn-detail", detailId], queryFn: () => api.grnDetail(detailId!), enabled: Boolean(detailId) });
   const pageSize = 8;
 
@@ -37,10 +37,10 @@ export default function Grn() {
 
   const create = useMutation({
     mutationFn: () => api.createGrn({
-      supplierId: form.supplierId || null,
-      outletId: form.outletId,
+      supplierId: form.supplierId,
+      locationId: form.outletId,
       note: form.note,
-      lines: [{ productId: form.productId, qty: Number(form.qty || 0), unitCost: Number(form.unitCost || 0), batchNo: form.batchNo || null, expiryDate: form.expiryDate || null }]
+      items: [{ itemId: form.productId, quantity: Number(form.qty || 0), unitCost: Number(form.unitCost || 0) }]
     }),
     onSuccess: async () => {
       setFormOpen(false);
@@ -53,7 +53,7 @@ export default function Grn() {
   });
 
   function openNew() {
-    setForm({ ...emptyForm, supplierId: suppliers[0]?.id ?? "", outletId: String(outlets[0]?.id ?? ""), productId: products[0]?.id ?? "" });
+    setForm({ ...emptyForm, supplierId: suppliers[0]?.id ?? "", outletId: String(outlets.find((outlet) => String(outlet.type) === "warehouse")?.id ?? outlets[0]?.id ?? ""), productId: String(items[0]?.id ?? "") });
     setFormOpen(true);
   }
 
@@ -89,7 +89,7 @@ export default function Grn() {
           <Pagination page={page} pages={pages} onPrev={() => setPage(Math.max(1, page - 1))} onNext={() => setPage(Math.min(pages, page + 1))} />
         </TableCard>
       </ScrollView>
-      <GrnModal open={formOpen} form={form} setForm={setForm} suppliers={suppliers.map((s) => ({ id: s.id, name: s.name }))} outlets={outlets.map((o) => ({ id: String(o.id), name: String(o.name) }))} products={products.map((p) => ({ id: p.id, name: p.name }))} saving={create.isPending} error={create.error} onClose={() => setFormOpen(false)} onSave={() => create.mutate()} />
+      <GrnModal open={formOpen} form={form} setForm={setForm} suppliers={suppliers.map((s) => ({ id: s.id, name: s.name }))} outlets={outlets.filter((o) => String(o.type) === "warehouse").map((o) => ({ id: String(o.id), name: String(o.name) }))} products={items.map((item) => ({ id: String(item.id), name: String(item.name) }))} saving={create.isPending} error={create.error} onClose={() => setFormOpen(false)} onSave={() => create.mutate()} />
       <DetailModal data={detail.data} loading={detail.isLoading} open={Boolean(detailId)} onClose={() => setDetailId(null)} />
     </Screen>
   );
@@ -100,9 +100,9 @@ function GrnModal({ open, form, setForm, suppliers, outlets, products, saving, e
 }
 
 function DetailModal({ open, data, loading, onClose }: { open: boolean; data: Record<string, unknown> | undefined; loading: boolean; onClose: () => void }) {
-  const lines = Array.isArray(data?.lines) ? data.lines as Record<string, unknown>[] : [];
-  const exportRows = lines.map((line) => ({ product: line.productName, qty: line.qty, unitCost: line.unitCost, batchNo: line.batchNo, expiryDate: line.expiryDate }));
-  return <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}><Pressable style={styles.backdrop} onPress={onClose}><Pressable style={styles.detailPanel}><View style={styles.detailHeader}><Text style={styles.modalTitle}>{String(data?.refNo ?? "GRN")}</Text><ExportMenu title={`${String(data?.refNo ?? "grn")}-detail`} rows={exportRows} /></View>{loading ? <Text style={styles.mutedText}>Loading...</Text> : <ScrollView contentContainerStyle={styles.detailBody}><Text style={styles.detailLine}>Supplier: {String(data?.supplierName ?? "-")}</Text><Text style={styles.detailLine}>Outlet: {String(data?.outletName ?? "-")}</Text><Text style={styles.detailLine}>Note: {String(data?.note ?? "-")}</Text>{data?.invoice ? <Button variant="outline" onPress={() => router.push("/supplier-invoices" as never)}>Open linked invoice</Button> : <Button onPress={() => router.push("/supplier-invoices" as never)}>Record invoice for this GRN</Button>}<Text style={styles.sectionTitle}>Lines</Text>{lines.map((line) => <Text key={String(line.id)} style={styles.detailLine}>{String(line.productName)} - {String(line.qty)} @ {formatMwk(Number(line.unitCost ?? 0))} {line.batchNo ? `- batch ${String(line.batchNo)}` : ""}</Text>)}</ScrollView>}</Pressable></Pressable></Modal>;
+  const lines = Array.isArray(data?.items) ? data.items as Record<string, unknown>[] : [];
+  const exportRows = lines.map((line) => ({ item: line.item_name, qty: line.quantity, unitCost: line.unit_cost }));
+  return <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}><Pressable style={styles.backdrop} onPress={onClose}><Pressable style={styles.detailPanel}><View style={styles.detailHeader}><Text style={styles.modalTitle}>{String(data?.ref_no ?? data?.refNo ?? "GRN")}</Text><ExportMenu title={`${String(data?.ref_no ?? data?.refNo ?? "grn")}-detail`} rows={exportRows} /></View>{loading ? <Text style={styles.mutedText}>Loading...</Text> : <ScrollView contentContainerStyle={styles.detailBody}><Text style={styles.detailLine}>Supplier: {String(data?.supplier_name ?? "-")}</Text><Text style={styles.detailLine}>Note: {String(data?.note ?? "-")}</Text><Button onPress={() => router.push("/supplier-invoices" as never)}>Record invoice for this GRN</Button><Text style={styles.sectionTitle}>Lines</Text>{lines.map((line) => <Text key={String(line.id)} style={styles.detailLine}>{String(line.item_name)} - {String(line.quantity)} @ {formatMwk(Number(line.unit_cost ?? 0))}</Text>)}</ScrollView>}</Pressable></Pressable></Modal>;
 }
 
 function Picker({ items, value, onChange }: { items: { id: string; name: string }[]; value: string; onChange: (id: string) => void }) {

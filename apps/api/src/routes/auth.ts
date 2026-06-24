@@ -13,9 +13,8 @@ export async function registerAuthRoutes(app: FastifyInstance) {
   app.get("/auth/me", async (request) => {
     const jwt = await request.jwtVerify<{ sub: string; role?: Role }>();
     const result = await pool.query(
-      `select u.id, u.username, u.email, u.full_name, coalesce(ur.role_id, $2) as role
+      `select u.id, u.username, u.email, u.full_name, coalesce(u.role, $2) as role
        from users u
-       left join user_roles ur on ur.user_id = u.id
        where u.id = $1 and u.status = 'active'
        limit 1`,
       [jwt.sub, jwt.role ?? "pos_cashier"]
@@ -34,9 +33,8 @@ export async function registerAuthRoutes(app: FastifyInstance) {
   app.post("/auth/login", async (request, reply) => {
     const body = loginSchema.parse(request.body);
     const result = await pool.query(
-      `select u.id, u.username, u.email, u.full_name, u.password_hash, coalesce(ur.role_id, 'super_admin') as role
+      `select u.id, u.username, u.email, u.full_name, u.password_hash, coalesce(u.role, 'super_admin') as role
        from users u
-       left join user_roles ur on ur.user_id = u.id
        where (u.username = $1 or u.email = $1) and u.status = 'active'
        limit 1`,
       [body.username.trim()]

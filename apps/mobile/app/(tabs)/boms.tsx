@@ -19,6 +19,7 @@ export default function Boms() {
   const [overhead, setOverhead] = useState("0");
   const { data: boms = [] } = useQuery({ queryKey: ["boms"], queryFn: api.boms });
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products });
+  const { data: items = [] } = useQuery({ queryKey: ["items"], queryFn: api.items });
 
   const create = useMutation({
     mutationFn: () => api.createBom({
@@ -26,8 +27,8 @@ export default function Boms() {
       name: name.trim(),
       outputQty: Number(outputQty || 1),
       laborCost: Number(laborCost || 0),
-      overhead: Number(overhead || 0),
-      components: [{ productId: materialId, qty: Number(componentQty || 1) }]
+      overheadCost: Number(overhead || 0),
+      items: [{ itemId: materialId, quantity: Number(componentQty || 1) }]
     }),
     onSuccess: async () => {
       setOpen(false);
@@ -37,7 +38,7 @@ export default function Boms() {
 
   function openNew() {
     setProductId(products.find((product) => product.isSellable)?.id ?? products[0]?.id ?? "");
-    setMaterialId(products.find((product) => product.isRaw)?.id ?? products[0]?.id ?? "");
+    setMaterialId(String(items[0]?.id ?? ""));
     setName("");
     setOutputQty("1");
     setComponentQty("1");
@@ -83,7 +84,7 @@ export default function Boms() {
             <Field value={name} onChangeText={setName} placeholder="BOM name" />
             <PickerRail label="Finished product" items={products.map((product) => ({ id: product.id, name: product.name }))} value={productId} onChange={setProductId} />
             <Field value={outputQty} onChangeText={setOutputQty} keyboardType="numeric" placeholder="Expected output quantity" />
-            <PickerRail label="Material component" items={products.map((product) => ({ id: product.id, name: product.name }))} value={materialId} onChange={setMaterialId} />
+            <PickerRail label="Raw material component" items={items.map((item) => ({ id: String(item.id), name: String(item.name) }))} value={materialId} onChange={setMaterialId} />
             <Field value={componentQty} onChangeText={setComponentQty} keyboardType="numeric" placeholder="Material quantity per output" />
             <View style={styles.grid}>
               <Field style={styles.gridField} value={laborCost} onChangeText={setLaborCost} keyboardType="numeric" placeholder="Labour cost" />

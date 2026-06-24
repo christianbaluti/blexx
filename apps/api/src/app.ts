@@ -4,8 +4,7 @@ import sensible from "@fastify/sensible";
 import Fastify from "fastify";
 import { config } from "./config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
-import { registerCommerceRoutes } from "./routes/commerce.js";
-import { registerModuleRoutes } from "./routes/modules.js";
+import { registerCoreRoutes } from "./routes/core.js";
 
 export async function createApp() {
   const app = Fastify({
@@ -21,8 +20,7 @@ export async function createApp() {
   app.get("/health", async () => ({ ok: true, service: "blex-api" }));
 
   await registerAuthRoutes(app);
-  await registerCommerceRoutes(app);
-  await registerModuleRoutes(app);
+  await registerCoreRoutes(app);
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error(error);
