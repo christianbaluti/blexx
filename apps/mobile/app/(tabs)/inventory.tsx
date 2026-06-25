@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useMemo, useState } from "react";
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { Product } from "@blex/shared";
 import { formatMwk } from "@blex/shared";
 import { AlertPanel, Badge, CommandButton, EmptyPanel, PageHeader, TabBar, TableCard, TableHeader } from "../../src/components/feature-ui";
-import { Button, Field, Screen } from "../../src/components/ui";
+import { ExportMenu } from "../../src/components/export-menu";
+import { Button, Card, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
@@ -21,17 +22,26 @@ export default function Inventory() {
   const [qty, setQty] = useState("");
   const [note, setNote] = useState("");
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products });
-  const { data: inventory = [] } = useQuery({ queryKey: ["inventory"], queryFn: api.inventory });
+  const { data: inventory = [], isLoading: loadingInventory, isFetching: fetchingInventory } = useQuery({ queryKey: ["inventory"], queryFn: api.inventory });
   const { data: outlets = [] } = useQuery({ queryKey: ["outlets"], queryFn: api.outlets });
-  const { data: batches = [] } = useQuery({ queryKey: ["inventory-batches"], queryFn: api.batches });
-  const { data: movements = [] } = useQuery({ queryKey: ["inventory-movements"], queryFn: api.movements });
-  const { data: transfers = [] } = useQuery({ queryKey: ["transfers"], queryFn: api.transfers });
-  const { data: counts = [] } = useQuery({ queryKey: ["stock-counts"], queryFn: api.stockCounts });
+  const { data: batches = [], isLoading: loadingBatches, isFetching: fetchingBatches } = useQuery({ queryKey: ["inventory-batches"], queryFn: api.batches });
+  const { data: movements = [], isLoading: loadingMovements, isFetching: fetchingMovements } = useQuery({ queryKey: ["inventory-movements"], queryFn: api.movements });
+  const { data: transfers = [], isLoading: loadingTransfers, isFetching: fetchingTransfers } = useQuery({ queryKey: ["transfers"], queryFn: api.transfers });
+  const { data: counts = [], isLoading: loadingCounts, isFetching: fetchingCounts } = useQuery({ queryKey: ["stock-counts"], queryFn: api.stockCounts });
   const lowStock = products.filter((product) => product.stock <= product.reorder);
   const stockRows = inventory.filter((row) => stockOutletId === "all" || String(row.outletId) === stockOutletId);
   const lowOutletStock = stockRows.filter((row) => Number(row.quantity ?? 0) <= Number(row.reorder ?? 0));
   const selectedProduct = products.find((product) => product.id === productId);
   const selectedOutlet = outlets.find((outlet) => String(outlet.id) === outletId);
+  const activeLoading = tab === "stock" ? loadingInventory : tab === "batches" ? loadingBatches : tab === "adjustments" ? loadingMovements : tab === "transfers" ? loadingTransfers : loadingCounts;
+  const activeFetching = tab === "stock" ? fetchingInventory : tab === "batches" ? fetchingBatches : tab === "adjustments" ? fetchingMovements : tab === "transfers" ? fetchingTransfers : fetchingCounts;
+  const exportRows = useMemo(() => {
+    if (tab === "stock") return stockRows.map((row) => ({ item: row.productName, location: row.outletName, onHand: row.quantity, reorder: row.reorder, unitCost: row.cost, value: Number(row.quantity ?? 0) * Number(row.cost ?? 0) }));
+    if (tab === "batches") return batches.map((batch) => ({ batch: batch.batchNo, product: batch.productName, expiry: batch.expiryDate ?? "", qty: batch.quantity, cost: batch.cost }));
+    if (tab === "adjustments") return movements.map((movement) => ({ item: movement.productName, movement: movement.movement, qty: movement.qty, reference: movement.refType ?? "", created: movement.createdAt }));
+    if (tab === "transfers") return transfers.map((transfer) => ({ transfer: transfer.id, status: transfer.status, items: transfer.totalItems, created: transfer.createdAt }));
+    return counts.map((count) => ({ outlet: count.outletName, status: count.status, variance: count.variance, created: count.createdAt, closed: count.closedAt ?? "" }));
+  }, [batches, counts, movements, stockRows, tab, transfers]);
 
   const adjustStock = useMutation({
     mutationFn: () =>
@@ -90,6 +100,10 @@ export default function Inventory() {
             { key: "counts", label: "Physical counts" }
           ]}
         />
+        <Card style={styles.toolbar}>
+          <ExportMenu title={`inventory-${tab}`} rows={exportRows} />
+          {activeFetching ? <ActivityIndicator color={colors.accent} /> : null}
+        </Card>
 
         {tab === "stock" ? (
           <>
@@ -111,6 +125,7 @@ export default function Inventory() {
             </ScrollView>
             <TableCard>
               <TableHeader columns={["Item", "Location", "On hand", "Reorder", "Unit cost", "Value", "Status"]} />
+              {activeLoading ? <LoadingRow label="Loading stock..." /> : null}
               {stockRows.map((row) => {
                 const product = products.find((item) => item.id === row.productId);
                 const quantity = Number(row.quantity ?? 0);
@@ -141,9 +156,10 @@ export default function Inventory() {
         ) : null}
 
         {tab === "batches" ? (
-          batches.length ? (
+          activeLoading || batches.length ? (
             <TableCard>
               <TableHeader columns={["Batch", "Product", "Expiry", "Qty", "Cost"]} />
+              {activeLoading ? <LoadingRow label="Loading batches..." /> : null}
               {batches.map((batch) => (
                 <View key={batch.id} style={styles.row}>
                   <Text style={styles.cellText}>{batch.batchNo}</Text>
@@ -158,9 +174,10 @@ export default function Inventory() {
         ) : null}
 
         {tab === "adjustments" ? (
-          movements.length ? (
+          activeLoading || movements.length ? (
             <TableCard>
               <TableHeader columns={["Item", "Movement", "Qty", "Reference", "Created"]} />
+              {activeLoading ? <LoadingRow label="Loading adjustments..." /> : null}
               {movements.slice(0, 40).map((movement) => (
                 <View key={movement.id} style={styles.row}>
                   <Text style={styles.cellText}>{movement.productName}</Text>
@@ -175,9 +192,10 @@ export default function Inventory() {
         ) : null}
 
         {tab === "transfers" ? (
-          transfers.length ? (
+          activeLoading || transfers.length ? (
             <TableCard>
               <TableHeader columns={["Transfer", "Status", "Items", "Created"]} />
+              {activeLoading ? <LoadingRow label="Loading transfers..." /> : null}
               {transfers.map((transfer) => (
                 <View key={transfer.id} style={styles.row}>
                   <Text style={styles.cellText}>{transfer.id.slice(0, 8).toUpperCase()}</Text>
@@ -191,9 +209,10 @@ export default function Inventory() {
         ) : null}
 
         {tab === "counts" ? (
-          counts.length ? (
+          activeLoading || counts.length ? (
             <TableCard>
               <TableHeader columns={["Outlet", "Status", "Variance", "Created", "Closed"]} />
+              {activeLoading ? <LoadingRow label="Loading counts..." /> : null}
               {counts.map((count) => (
                 <View key={count.id} style={styles.row}>
                   <Text style={styles.cellText}>{count.outletName}</Text>
@@ -260,17 +279,24 @@ export default function Inventory() {
   );
 }
 
+function LoadingRow({ label }: { label: string }) {
+  return <View style={styles.loadingRow}><ActivityIndicator color={colors.accent} /><Text style={styles.loadingText}>{label}</Text></View>;
+}
+
 const styles = StyleSheet.create({
   content: { gap: 14, padding: 18, width: "100%", maxWidth: 1240, alignSelf: "center" },
+  toolbar: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", padding: 10 },
   row: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 11 },
-  itemCell: { flex: 1.4, minWidth: 170 },
-  cell: { flex: 1, minWidth: 100 },
+  itemCell: { width: 170, minWidth: 170 },
+  cell: { width: 100, minWidth: 100 },
   rowTitle: { color: colors.ink, fontWeight: "900" },
   rowMeta: { color: colors.muted, fontFamily: typography.monoMedium, fontSize: 11, marginTop: 3 },
-  cellText: { flex: 1, minWidth: 110, color: colors.ink, fontWeight: "800" },
-  mutedText: { flex: 1, minWidth: 120, color: colors.muted, fontSize: 12 },
-  rightCell: { flex: 1, minWidth: 90, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
-  rightMuted: { flex: 1, minWidth: 90, color: colors.muted, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
+  cellText: { width: 150, minWidth: 150, color: colors.ink, fontWeight: "800" },
+  mutedText: { width: 145, minWidth: 145, color: colors.muted, fontSize: 12 },
+  rightCell: { width: 110, minWidth: 110, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
+  rightMuted: { width: 110, minWidth: 110, color: colors.muted, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
+  loadingRow: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14 },
+  loadingText: { color: colors.muted, fontWeight: "700" },
   hint: { color: colors.muted, textAlign: "center", fontSize: 12 },
   backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },
   panel: { width: "100%", maxWidth: 520, gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },

@@ -1,5 +1,5 @@
 import { type ReactNode } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View, type PressableProps, type StyleProp, type TextInputProps, type ViewStyle } from "react-native";
+import { Pressable, StyleSheet, Text, TextInput, View, useWindowDimensions, type PressableProps, type StyleProp, type TextInputProps, type ViewStyle } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, shadow, typography } from "../lib/theme";
 
@@ -37,10 +37,18 @@ export function Field(props: TextInputProps) {
 }
 
 export function Kpi({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "danger" | "good" }) {
+  const { width } = useWindowDimensions();
+  const compact = width < 520;
   return (
-    <Card style={styles.kpi}>
+    <Card style={[styles.kpi, compact && styles.kpiCompact]}>
       <Text style={styles.eyebrow}>{label}</Text>
-      <Text style={[styles.kpiValue, tone === "danger" && { color: colors.danger }, tone === "good" && { color: colors.accent }]}>{value}</Text>
+      <Text
+        style={[styles.kpiValue, compact && styles.kpiValueCompact, tone === "danger" && { color: colors.danger }, tone === "good" && { color: colors.accent }]}
+        numberOfLines={2}
+        adjustsFontSizeToFit
+      >
+        {value}
+      </Text>
     </Card>
   );
 }
@@ -104,10 +112,19 @@ export const styles = StyleSheet.create({
     flex: 1,
     minWidth: 160
   },
+  kpiCompact: {
+    flexBasis: "47%",
+    minWidth: 142,
+    padding: 10
+  },
   kpiValue: {
     color: colors.ink,
     fontFamily: typography.displayBold,
     fontSize: 27,
     marginTop: 8
+  },
+  kpiValueCompact: {
+    fontSize: 20,
+    marginTop: 5
   }
 });

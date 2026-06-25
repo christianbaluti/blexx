@@ -1,6 +1,6 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { type ReactNode } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
 import { colors, typography } from "../lib/theme";
 import { Button, Card } from "./ui";
 
@@ -38,14 +38,16 @@ export function MetricCard({
   tone?: "default" | "accent" | "success" | "danger" | "warning";
   icon?: keyof typeof MaterialCommunityIcons.glyphMap;
 }) {
+  const { width } = useWindowDimensions();
+  const compact = width < 520;
   const color = tone === "success" ? colors.success : tone === "danger" ? colors.danger : tone === "warning" ? colors.warning : tone === "accent" ? colors.accent : colors.ink;
   return (
-    <Card style={styles.metricCard}>
+    <Card style={[styles.metricCard, compact && styles.metricCardCompact]}>
       <View style={styles.metricTop}>
         <Text style={styles.metricLabel}>{label}</Text>
         {icon ? <MaterialCommunityIcons name={icon} size={17} color={color} /> : null}
       </View>
-      <Text style={[styles.metricValue, { color }]}>{value}</Text>
+      <Text style={[styles.metricValue, compact && styles.metricValueCompact, { color }]} numberOfLines={2} adjustsFontSizeToFit>{value}</Text>
     </Card>
   );
 }
@@ -131,9 +133,28 @@ export function TableCard({ children, style, minWidth = 760 }: { children: React
 export function TableHeader({ columns }: { columns: string[] }) {
   return (
     <View style={styles.tableHeader}>
-      {columns.map((column) => <Text key={column} style={styles.tableHeaderText}>{column}</Text>)}
+      {columns.map((column, index) => (
+        <Text key={`${column}-${index}`} style={[styles.tableHeaderText, columnWidthStyle(column)]}>{column}</Text>
+      ))}
     </View>
   );
+}
+
+function columnWidthStyle(column: string): TextStyle {
+  const key = column.toLowerCase();
+  if (!column) return { width: 42, minWidth: 42, flex: 0 };
+  if (["status", "unit", "items", "qty", "by"].includes(key)) return { width: 100, minWidth: 100, flex: 0 };
+  if (["balance", "total", "paid", "value", "cost", "price", "sales", "stock", "reorder"].some((word) => key.includes(word))) {
+    return { width: 110, minWidth: 110, flex: 0, textAlign: "right" };
+  }
+  if (["contact", "address", "supplier", "customer", "product", "item", "email"].some((word) => key.includes(word))) {
+    return { width: 170, minWidth: 170, flex: 0 };
+  }
+  if (["received", "created", "date", "due", "last login"].some((word) => key.includes(word))) {
+    return { width: 145, minWidth: 145, flex: 0 };
+  }
+  if (["attachment", "reference", "location"].some((word) => key.includes(word))) return { width: 150, minWidth: 150, flex: 0 };
+  return { width: 130, minWidth: 130, flex: 0 };
 }
 
 export function EmptyPanel({
@@ -186,10 +207,12 @@ const styles = StyleSheet.create({
   title: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 32, fontWeight: "700", marginTop: 4 },
   description: { color: colors.muted, fontSize: 14, marginTop: 5, maxWidth: 720 },
   headerActions: { flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" },
-  metricCard: { flexGrow: 1, flexBasis: 180, minWidth: 160 },
+  metricCard: { flexGrow: 1, flexBasis: 180, minWidth: 160, padding: 12 },
+  metricCardCompact: { flexBasis: "47%", minWidth: 142, padding: 10 },
   metricTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
   metricLabel: { color: colors.muted, fontSize: 10, fontWeight: "900", textTransform: "uppercase" },
   metricValue: { fontFamily: typography.displayBold, fontSize: 23, fontWeight: "700", marginTop: 8 },
+  metricValueCompact: { fontSize: 17, marginTop: 5 },
   badge: { alignSelf: "flex-start", borderWidth: 1, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 4 },
   badgeText: { fontSize: 11, fontWeight: "900", textTransform: "capitalize" },
   tabs: { gap: 7, paddingVertical: 2 },
@@ -204,7 +227,7 @@ const styles = StyleSheet.create({
   tableCard: { padding: 0, overflow: "hidden" },
   tableScrollContent: { flexGrow: 1 },
   tableHeader: { flexDirection: "row", gap: 10, backgroundColor: colors.surfaceAlt, borderBottomWidth: 1, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 10 },
-  tableHeaderText: { flex: 1, color: colors.muted, fontSize: 10, fontWeight: "900", textTransform: "uppercase" },
+  tableHeaderText: { color: colors.muted, fontSize: 10, fontWeight: "900", textTransform: "uppercase" },
   emptyPanel: { minHeight: 210, alignItems: "center", justifyContent: "center" },
   emptyIcon: { width: 44, height: 44, alignItems: "center", justifyContent: "center", borderRadius: 22, backgroundColor: colors.surfaceAlt, marginBottom: 10 },
   emptyTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 19, fontWeight: "700" },

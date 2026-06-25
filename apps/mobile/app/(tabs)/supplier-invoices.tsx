@@ -2,12 +2,12 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useMemo, useState } from "react";
-import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { GoodsReceivedNote, Supplier, SupplierInvoice } from "@blex/shared";
 import { formatMwk } from "@blex/shared";
 import { Badge, CommandButton, MetricCard, PageHeader, TableCard, TableHeader } from "../../src/components/feature-ui";
 import { ExportMenu } from "../../src/components/export-menu";
-import { Button, Field, Screen } from "../../src/components/ui";
+import { Button, Card, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
@@ -24,7 +24,7 @@ export default function SupplierInvoices() {
   const [form, setForm] = useState<InvoiceForm>(emptyForm);
   const [detailFor, setDetailFor] = useState<SupplierInvoice | null>(null);
   const [menuFor, setMenuFor] = useState<SupplierInvoice | null>(null);
-  const { data: invoices = [] } = useQuery({ queryKey: ["supplier-invoices"], queryFn: api.supplierInvoices });
+  const { data: invoices = [], isLoading, isFetching } = useQuery({ queryKey: ["supplier-invoices"], queryFn: api.supplierInvoices });
   const { data: suppliers = [] } = useQuery({ queryKey: ["suppliers"], queryFn: api.suppliers });
   const { data: grns = [] } = useQuery({ queryKey: ["grn"], queryFn: api.grn });
   const detail = useQuery({ queryKey: ["supplier-invoice", detailFor?.id], queryFn: () => api.supplierInvoiceDetail(detailFor!.id), enabled: Boolean(detailFor) });
@@ -85,13 +85,18 @@ export default function SupplierInvoices() {
           <MetricCard label="Outstanding" value={formatMwk(outstanding)} tone={outstanding ? "danger" : "default"} icon="cash-clock" />
           <MetricCard label="From GRN" value={invoices.filter((item) => item.grnId).length} icon="package-variant-closed-check" />
         </View>
-        <TableCard>
-          <View style={styles.toolbar}>
-            <Field value={query} onChangeText={(value) => { setQuery(value); setPage(1); }} placeholder="Search invoice, supplier, due date" style={styles.search} />
-            <Filter value={status} setValue={(value) => { setStatus(value); setPage(1); }} />
+        <Card style={styles.toolbar}>
+          <Field value={query} onChangeText={(value) => { setQuery(value); setPage(1); }} placeholder="Search invoice, supplier, due date" style={styles.search} />
+          <Filter value={status} setValue={(value) => { setStatus(value); setPage(1); }} />
+          <View style={styles.toolbarActions}>
             <ExportMenu title="supplier-invoices" rows={exportRows} />
+            {isFetching ? <ActivityIndicator color={colors.accent} /> : null}
           </View>
+        </Card>
+
+        <TableCard>
           <TableHeader columns={["Invoice", "Supplier", "Due", "Status", "Total", "Paid", "Attachment", ""]} />
+          {isLoading ? <LoadingRow label="Loading invoices..." /> : null}
           {rows.map((invoice) => (
             <Pressable key={invoice.id} style={styles.row} onPress={() => setDetailFor(invoice)}>
               <Text style={styles.cellText}>{invoice.refNo}</Text>
@@ -162,6 +167,10 @@ function MenuButton({ label, icon, onPress, danger }: { label: string; icon: key
   return <Pressable style={styles.menuButton} onPress={onPress}><MaterialCommunityIcons name={icon} size={18} color={danger ? colors.danger : colors.ink} /><Text style={[styles.menuText, danger && { color: colors.danger }]}>{label}</Text></Pressable>;
 }
 
+function LoadingRow({ label }: { label: string }) {
+  return <View style={styles.loadingRow}><ActivityIndicator color={colors.accent} /><Text style={styles.loadingText}>{label}</Text></View>;
+}
+
 function DetailModal({ invoice, data, loading, onClose }: { invoice: SupplierInvoice | null; data: Record<string, unknown> | undefined; loading: boolean; onClose: () => void }) {
   const expenses = Array.isArray(data?.expenses) ? data.expenses as Record<string, unknown>[] : [];
   const exportRows = [{ type: "invoice", ref: data?.refNo, total: data?.total, paid: data?.paid }, ...expenses.map((x) => ({ type: "payment", ref: x.id, total: x.amount, paid: x.amount }))];
@@ -171,15 +180,18 @@ function DetailModal({ invoice, data, loading, onClose }: { invoice: SupplierInv
 const styles = StyleSheet.create({
   content: { gap: 14, padding: 18, width: "100%", maxWidth: 1240, alignSelf: "center" },
   metrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  toolbar: { flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center", borderBottomWidth: 1, borderBottomColor: colors.line, padding: 12 },
-  search: { flexGrow: 1, flexBasis: 260 },
+  toolbar: { gap: 8, padding: 10 },
+  toolbarActions: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  search: { width: "100%" },
   filterRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   row: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 11 },
-  cell: { flex: 1, minWidth: 100 },
-  cellText: { flex: 1, minWidth: 130, color: colors.ink, fontWeight: "800" },
-  mutedText: { flex: 1, minWidth: 120, color: colors.muted, fontSize: 12 },
-  rightCell: { flex: 1, minWidth: 100, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
-  iconButton: { width: 34, height: 34, alignItems: "center", justifyContent: "center" },
+  cell: { width: 100, minWidth: 100 },
+  cellText: { width: 130, minWidth: 130, color: colors.ink, fontWeight: "800" },
+  mutedText: { width: 120, minWidth: 120, color: colors.muted, fontSize: 12 },
+  rightCell: { width: 110, minWidth: 110, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
+  iconButton: { width: 42, minWidth: 42, height: 34, alignItems: "center", justifyContent: "center" },
+  loadingRow: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14 },
+  loadingText: { color: colors.muted, fontWeight: "700" },
   pagination: { minHeight: 54, flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: 12 },
   pageText: { color: colors.muted, fontWeight: "800" },
   backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },

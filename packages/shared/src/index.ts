@@ -75,7 +75,7 @@ export interface Supplier {
   address: string | null;
   note?: string | null;
   balance: number;
-  status?: "active" | "archived" | "draft" | "disabled";
+  status?: "active" | "suspended" | "archived" | "draft" | "disabled";
 }
 
 export interface Customer {

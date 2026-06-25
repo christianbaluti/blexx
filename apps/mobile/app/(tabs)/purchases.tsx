@@ -1,10 +1,11 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useMemo, useState } from "react";
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { formatMwk } from "@blex/shared";
 import { Badge, CommandButton, EmptyPanel, MetricCard, PageHeader, TabBar, TableCard, TableHeader } from "../../src/components/feature-ui";
-import { Button, Field, Screen } from "../../src/components/ui";
+import { ExportMenu } from "../../src/components/export-menu";
+import { Button, Card, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
@@ -27,12 +28,19 @@ export default function Purchases() {
   const [unitCost, setUnitCost] = useState("0");
   const [landedCost, setLandedCost] = useState("0");
   const [note, setNote] = useState("");
-  const { data: purchaseOrders = [] } = useQuery({ queryKey: ["purchase-orders"], queryFn: api.purchaseOrders });
-  const { data: grn = [] } = useQuery({ queryKey: ["grn"], queryFn: api.grn });
-  const { data: invoices = [] } = useQuery({ queryKey: ["supplier-invoices"], queryFn: api.supplierInvoices });
+  const { data: purchaseOrders = [], isLoading: loadingPurchaseOrders, isFetching: fetchingPurchaseOrders } = useQuery({ queryKey: ["purchase-orders"], queryFn: api.purchaseOrders });
+  const { data: grn = [], isLoading: loadingGrn, isFetching: fetchingGrn } = useQuery({ queryKey: ["grn"], queryFn: api.grn });
+  const { data: invoices = [], isLoading: loadingInvoices, isFetching: fetchingInvoices } = useQuery({ queryKey: ["supplier-invoices"], queryFn: api.supplierInvoices });
   const { data: suppliers = [] } = useQuery({ queryKey: ["suppliers"], queryFn: api.suppliers });
   const { data: items = [] } = useQuery({ queryKey: ["items"], queryFn: api.items });
   const openPayables = invoices.reduce((sum, invoice) => sum + Math.max(0, invoice.total - invoice.paid), 0);
+  const activeLoading = tab === "po" ? loadingPurchaseOrders : tab === "grn" ? loadingGrn : loadingInvoices;
+  const activeFetching = tab === "po" ? fetchingPurchaseOrders : tab === "grn" ? fetchingGrn : fetchingInvoices;
+  const exportRows = useMemo(() => {
+    if (tab === "po") return purchaseOrders.map((po) => ({ ref: String((po as unknown as Record<string, unknown>).ref_no ?? po.id), supplier: po.supplierName ?? po.supplierId, date: String((po as unknown as Record<string, unknown>).order_date ?? po.date), status: po.status, total: po.total }));
+    if (tab === "grn") return grn.map((note) => ({ ref: note.refNo, purchaseOrder: note.poId ?? "", receivedAt: note.receivedAt, totalItems: note.totalItems, receivedBy: note.receivedBy ?? "" }));
+    return invoices.map((invoice) => ({ ref: invoice.refNo, supplier: invoice.supplierName, dueDate: invoice.dueDate ?? "", status: invoice.status, total: invoice.total, paid: invoice.paid }));
+  }, [grn, invoices, purchaseOrders, tab]);
   const create = useMutation({
     mutationFn: () => api.createPurchaseOrder({
       supplierId,
@@ -80,10 +88,15 @@ export default function Purchases() {
             { key: "inv", label: "Supplier invoices" }
           ]}
         />
+        <Card style={styles.toolbar}>
+          <ExportMenu title={tab === "po" ? "purchase-orders" : tab === "grn" ? "goods-received" : "supplier-invoices"} rows={exportRows} />
+          {activeFetching ? <ActivityIndicator color={colors.accent} /> : null}
+        </Card>
 
         {tab === "po" ? (
           <TableCard>
             <TableHeader columns={["Ref", "Supplier", "Date", "Status", "Total", ""]} />
+            {activeLoading ? <LoadingRow label="Loading purchase orders..." /> : null}
             {purchaseOrders.map((po) => (
               <View key={po.id} style={styles.row}>
                 <Text style={styles.monoCell}>{String((po as unknown as Record<string, unknown>).ref_no ?? po.id.slice(0, 8).toUpperCase())}</Text>
@@ -98,9 +111,10 @@ export default function Purchases() {
         ) : null}
 
         {tab === "grn" ? (
-          grn.length ? (
+          activeLoading || grn.length ? (
             <TableCard>
               <TableHeader columns={["Ref", "PO", "Received", "Items", "By"]} />
+              {activeLoading ? <LoadingRow label="Loading GRNs..." /> : null}
               {grn.map((note) => (
                 <View key={note.id} style={styles.row}>
                   <Text style={styles.monoCell}>{note.refNo}</Text>
@@ -115,9 +129,10 @@ export default function Purchases() {
         ) : null}
 
         {tab === "inv" ? (
-          invoices.length ? (
+          activeLoading || invoices.length ? (
             <TableCard>
               <TableHeader columns={["Invoice", "Supplier", "Due", "Status", "Total", "Paid"]} />
+              {activeLoading ? <LoadingRow label="Loading invoices..." /> : null}
               {invoices.map((invoice) => (
                 <View key={invoice.id} style={styles.row}>
                   <Text style={styles.monoCell}>{invoice.refNo}</Text>
@@ -175,16 +190,23 @@ function Picker({ label, items, value, onChange }: { label: string; items: { id:
   );
 }
 
+function LoadingRow({ label }: { label: string }) {
+  return <View style={styles.loadingRow}><ActivityIndicator color={colors.accent} /><Text style={styles.loadingText}>{label}</Text></View>;
+}
+
 const styles = StyleSheet.create({
   content: { gap: 14, padding: 18, width: "100%", maxWidth: 1240, alignSelf: "center" },
   metrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  toolbar: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", padding: 10 },
   row: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 11 },
-  cell: { flex: 1, minWidth: 100 },
-  cellText: { flex: 1, minWidth: 140, color: colors.ink, fontWeight: "800" },
-  monoCell: { flex: 1, minWidth: 100, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12 },
-  mutedText: { flex: 1, minWidth: 120, color: colors.muted, fontSize: 12 },
-  rightCell: { flex: 1, minWidth: 90, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
-  docButton: { width: 34, height: 34, alignItems: "center", justifyContent: "center", borderRadius: 6 }
+  cell: { width: 100, minWidth: 100 },
+  cellText: { width: 170, minWidth: 170, color: colors.ink, fontWeight: "800" },
+  monoCell: { width: 130, minWidth: 130, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12 },
+  mutedText: { width: 145, minWidth: 145, color: colors.muted, fontSize: 12 },
+  rightCell: { width: 110, minWidth: 110, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
+  docButton: { width: 42, minWidth: 42, height: 34, alignItems: "center", justifyContent: "center", borderRadius: 6 },
+  loadingRow: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14 },
+  loadingText: { color: colors.muted, fontWeight: "700" }
   ,backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },
   panel: { width: "100%", maxWidth: 560, gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },
   modalTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 23, fontWeight: "700" },

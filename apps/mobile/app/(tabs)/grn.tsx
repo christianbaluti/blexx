@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useMemo, useState } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { formatMwk } from "@blex/shared";
 import { Badge, CommandButton, MetricCard, PageHeader, TableCard, TableHeader } from "../../src/components/feature-ui";
 import { ExportMenu } from "../../src/components/export-menu";
-import { Button, Field, Screen } from "../../src/components/ui";
+import { Button, Card, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
@@ -20,7 +20,7 @@ export default function Grn() {
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<GrnForm>(emptyForm);
   const [detailId, setDetailId] = useState<string | null>(null);
-  const { data: grns = [] } = useQuery({ queryKey: ["grn"], queryFn: api.grn });
+  const { data: grns = [], isLoading, isFetching } = useQuery({ queryKey: ["grn"], queryFn: api.grn });
   const { data: suppliers = [] } = useQuery({ queryKey: ["suppliers"], queryFn: api.suppliers });
   const { data: outlets = [] } = useQuery({ queryKey: ["outlets"], queryFn: api.outlets });
   const { data: items = [] } = useQuery({ queryKey: ["items"], queryFn: api.items });
@@ -68,13 +68,18 @@ export default function Grn() {
           <MetricCard label="Received value" value={formatMwk(totalValue)} tone="accent" icon="cash" />
           <MetricCard label="Linked invoices" value={grns.filter((g) => g.poId || g.supplierId).length} icon="file-document-outline" />
         </View>
-        <TableCard>
-          <View style={styles.toolbar}>
-            <Field value={query} onChangeText={(value) => { setQuery(value); setPage(1); }} placeholder="Search GRN, supplier, outlet" style={styles.search} />
-            <Picker items={[{ id: "all", name: "All suppliers" }, ...suppliers.map((s) => ({ id: s.id, name: s.name }))]} value={supplierFilter} onChange={(value) => { setSupplierFilter(value); setPage(1); }} />
+        <Card style={styles.toolbar}>
+          <Field value={query} onChangeText={(value) => { setQuery(value); setPage(1); }} placeholder="Search GRN, supplier, outlet" style={styles.search} />
+          <Picker items={[{ id: "all", name: "All suppliers" }, ...suppliers.map((s) => ({ id: s.id, name: s.name }))]} value={supplierFilter} onChange={(value) => { setSupplierFilter(value); setPage(1); }} />
+          <View style={styles.toolbarActions}>
             <ExportMenu title="grns" rows={exportRows} />
+            {isFetching ? <ActivityIndicator color={colors.accent} /> : null}
           </View>
+        </Card>
+
+        <TableCard>
           <TableHeader columns={["GRN", "Supplier", "Outlet", "Items", "Value", "Received", "Status"]} />
+          {isLoading ? <LoadingRow label="Loading GRNs..." /> : null}
           {rows.map((grn) => (
             <Pressable key={grn.id} style={styles.row} onPress={() => setDetailId(grn.id)}>
               <Text style={styles.cellText}>{grn.refNo}</Text>
@@ -113,16 +118,23 @@ function Pagination({ page, pages, onPrev, onNext }: { page: number; pages: numb
   return <View style={styles.pagination}><Button variant="outline" onPress={onPrev}>Prev</Button><Text style={styles.pageText}>Page {page} of {pages}</Text><Button variant="outline" onPress={onNext}>Next</Button></View>;
 }
 
+function LoadingRow({ label }: { label: string }) {
+  return <View style={styles.loadingRow}><ActivityIndicator color={colors.accent} /><Text style={styles.loadingText}>{label}</Text></View>;
+}
+
 const styles = StyleSheet.create({
   content: { gap: 14, padding: 18, width: "100%", maxWidth: 1240, alignSelf: "center" },
   metrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  toolbar: { flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center", borderBottomWidth: 1, borderBottomColor: colors.line, padding: 12 },
-  search: { flexGrow: 1, flexBasis: 260 },
+  toolbar: { gap: 8, padding: 10 },
+  toolbarActions: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  search: { width: "100%" },
   row: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 11 },
-  cell: { flex: 1, minWidth: 100 },
-  cellText: { flex: 1, minWidth: 130, color: colors.ink, fontWeight: "800" },
-  mutedText: { flex: 1, minWidth: 150, color: colors.muted, fontSize: 12 },
-  rightCell: { flex: 1, minWidth: 90, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
+  cell: { width: 100, minWidth: 100 },
+  cellText: { width: 130, minWidth: 130, color: colors.ink, fontWeight: "800" },
+  mutedText: { width: 145, minWidth: 145, color: colors.muted, fontSize: 12 },
+  rightCell: { width: 110, minWidth: 110, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
+  loadingRow: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14 },
+  loadingText: { color: colors.muted, fontWeight: "700" },
   pagination: { minHeight: 54, flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: 12 },
   pageText: { color: colors.muted, fontWeight: "800" },
   chips: { gap: 8 },
