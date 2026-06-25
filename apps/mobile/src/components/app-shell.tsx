@@ -31,13 +31,10 @@ const sections: { title: string; items: NavItem[] }[] = [
     { label: "Product Blueprints", route: "/boms", icon: "file-tree-outline" },
     { label: "Production", route: "/production", icon: "factory" },
     { label: "Warehouse Stock", route: "/inventory", icon: "warehouse" },
-    { label: "Shop Stock", route: "/transfers", icon: "storefront-outline" },
     { label: "Stock Transfers", route: "/transfers", icon: "swap-horizontal" }
   ] },
   { title: "Sales", items: [
-    { label: "Customers", route: "/customers", icon: "account-group-outline" },
-    { label: "POS Sales", route: "/pos", icon: "cart-check" },
-    { label: "Receipts", route: "/receipts", icon: "receipt-text-outline" }
+    { label: "Customers", route: "/customers", icon: "account-group-outline" }
   ] },
   { title: "Finance", items: [
     { label: "Finance", route: "/finance", icon: "finance" },
@@ -115,7 +112,7 @@ function Navigation({ onNavigate }: { onNavigate: () => void }) {
               const active = pathname === item.route || pathname.endsWith(item.route);
               return (
                 <Pressable
-                  key={item.route}
+                  key={`${section.title}-${item.route}-${item.label}`}
                   style={[styles.navItem, active && styles.navItemActive]}
                   onPress={() => {
                     router.push(item.route as never);
