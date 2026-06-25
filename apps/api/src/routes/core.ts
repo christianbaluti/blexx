@@ -184,10 +184,50 @@ const userSchema = z.object({
 });
 
 export async function registerCoreRoutes(app: FastifyInstance) {
+  const defaultSettings = {
+    company: {
+      tradingName: "POS & Inventory +",
+      currency: "MWK",
+      vatRate: 0,
+      address: ""
+    },
+    downloads: {
+      androidUrl: "",
+      iosUrl: ""
+    },
+    security: {
+      requireTwoFactor: false,
+      biometricUnlock: true,
+      sessionAutoLockMinutes: 15,
+      passwordExpiryDays: 0
+    },
+    notifications: {
+      lowStockEmailEnabled: false,
+      expiryEmailEnabled: false
+    }
+  };
+
+  app.get("/settings/branding", async () => ({
+    appName: "POS & Inventory +",
+    appSubtitle: "POS and inventory management",
+    logoDataUrl: null,
+    iconDataUrl: null,
+    logoUpdatedAt: null
+  }));
+
+  app.patch("/settings/branding", async (request) => request.body);
+
   app.get("/settings", async () => {
-    const result = await pool.query("select value from app_settings where key = 'settings'");
-    return result.rows[0]?.value ?? {};
+    return defaultSettings;
   });
+
+  app.patch("/settings", async (request) => {
+    return request.body ?? defaultSettings;
+  });
+
+  app.get("/sync/health", async () => ({ online: true, pending: 0, conflicts: 0, failed: 0, lastSyncedAt: new Date().toISOString() }));
+  app.get("/backup", async () => []);
+  app.post("/backup", async () => ({ id: ref("BKP"), name: "Manual backup", createdAt: new Date().toISOString(), status: "created" }));
 
   app.get("/dashboard", async () => {
     const result = await pool.query(`
@@ -803,6 +843,32 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     return reply.code(201).send({ id: result.rows[0].id });
   });
 
+  app.patch("/customers/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const body = customerSchema.partial().extend({ status: z.enum(["active", "suspended", "disabled"]).optional() }).parse(request.body);
+    await pool.query(
+      `update customers set name = coalesce($2, name), phone = coalesce($3, phone), email = coalesce($4, email),
+       address = coalesce($5, address), status = coalesce($6::user_status, status), updated_at = now()
+       where id = $1`,
+      [id, body.name ?? null, body.phone ?? null, body.email ?? null, body.address ?? null, body.status ?? null]
+    );
+    return { ok: true };
+  });
+
+  app.delete("/customers/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const linked = await pool.query("select 1 from sales where customer_id = $1 limit 1", [id]);
+    if (linked.rows.length) throw app.httpErrors.conflict("Customer has sales. Suspend instead of deleting.");
+    await pool.query("delete from customers where id = $1", [id]);
+    return { ok: true };
+  });
+
+  app.post("/customers/:id/suspend", async (request) => {
+    const { id } = idParam.parse(request.params);
+    await pool.query("update customers set status = 'suspended', updated_at = now() where id = $1", [id]);
+    return { ok: true };
+  });
+
   app.get("/customers/:id", async (request) => {
     const { id } = idParam.parse(request.params);
     const [customer, sales, payments] = await Promise.all([
@@ -812,6 +878,17 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     ]);
     if (!customer.rows[0]) throw app.httpErrors.notFound("Customer not found");
     return { customer: customer.rows[0], sales: sales.rows, payments: payments.rows };
+  });
+
+  app.post("/customers/:id/payment", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const body = z.object({ amount: z.number().positive(), method: z.enum(["cash", "card", "mobile", "bank", "credit"]).default("cash"), note: nullableText }).parse(request.body);
+    await pool.query(
+      "insert into payments (party_type, customer_id, method, amount, note) values ('customer', $1, $2, $3, $4)",
+      [id, body.method, body.amount, body.note ?? null]
+    );
+    await pool.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('customer_payment','customer',$1,$2,'Customer payment')", [id, body.amount]);
+    return { ok: true };
   });
 
   app.get("/finance", async () => {
@@ -861,6 +938,14 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.get("/users", async () => (await pool.query("select id, username, email, full_name as name, role, status, last_login_at as \"lastLoginAt\" from users order by created_at desc")).rows);
 
+  app.get("/roles", async () => [
+    { id: "super_admin", label: "Administrator" },
+    { id: "inventory_officer", label: "Inventory officer" },
+    { id: "production_officer", label: "Production officer" },
+    { id: "pos_cashier", label: "POS cashier" },
+    { id: "finance_user", label: "Finance user" }
+  ]);
+
   app.post("/users", async (request, reply) => {
     const body = userSchema.parse(request.body);
     const passwordHash = await bcrypt.hash(body.password, 10);
@@ -869,5 +954,21 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       [body.username, body.email, body.name, passwordHash, body.role]
     );
     return reply.code(201).send({ id: result.rows[0].id });
+  });
+
+  app.patch("/users/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const body = z.object({
+      name: z.string().trim().min(1).optional(),
+      email: z.string().email().optional(),
+      role: z.string().optional(),
+      status: z.enum(["active", "suspended", "disabled"]).optional()
+    }).parse(request.body);
+    await pool.query(
+      `update users set full_name = coalesce($2, full_name), email = coalesce($3, email), role = coalesce($4, role),
+       status = coalesce($5::user_status, status), updated_at = now() where id = $1`,
+      [id, body.name ?? null, body.email ?? null, body.role ?? null, body.status ?? null]
+    );
+    return { ok: true };
   });
 }

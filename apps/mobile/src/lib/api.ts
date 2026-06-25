@@ -171,7 +171,22 @@ export const api = {
   items: () => cached<Record<string, unknown>[]>("items", "/items", []),
   categories: async () => [] as Category[],
   suppliers: () => cached<Supplier[]>("suppliers", "/suppliers", []),
-  customers: () => cached<Customer[]>("customers", "/customers", []),
+  async customers() {
+    const rows = await cached<Record<string, unknown>[]>("customers", "/customers", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      phone: row.phone ? String(row.phone) : null,
+      email: row.email ? String(row.email) : null,
+      address: row.address ? String(row.address) : null,
+      loyaltyPoints: 0,
+      creditLimit: 0,
+      balance: 0,
+      totalPurchases: Number(row.totalPurchases ?? 0),
+      saleCount: Number(row.saleCount ?? 0),
+      status: String(row.status ?? "active") as Customer["status"]
+    } as Customer & { totalPurchases: number; saleCount: number }));
+  },
   async sales() {
     const rows = await cached<Record<string, unknown>[]>("sales", "/sales", []);
     return rows.map((row) => ({

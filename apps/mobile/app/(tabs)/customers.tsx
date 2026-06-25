@@ -10,8 +10,8 @@ import { Button, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
-type CustomerForm = { name: string; phone: string; email: string; address: string; loyaltyPoints: string; creditLimit: string; openingBalance: string };
-const emptyForm: CustomerForm = { name: "", phone: "", email: "", address: "", loyaltyPoints: "0", creditLimit: "0", openingBalance: "0" };
+type CustomerForm = { name: string; phone: string; email: string; address: string };
+const emptyForm: CustomerForm = { name: "", phone: "", email: "", address: "" };
 
 export default function Customers() {
   const queryClient = useQueryClient();
@@ -29,19 +29,16 @@ export default function Customers() {
   const pageSize = 8;
   const filtered = useMemo(() => customers.filter((customer) => {
     const text = [customer.name, customer.phone ?? "", customer.email ?? "", customer.address ?? ""].join(" ").toLowerCase();
-    const credit = customer.balance > 0 || customer.creditLimit > 0;
-    const loyalty = customer.loyaltyPoints > 0;
-    return (!query || text.includes(query.toLowerCase())) && (filter === "all" || (filter === "credit" && credit) || (filter === "loyalty" && loyalty) || (customer.status ?? "active") === filter);
+    return (!query || text.includes(query.toLowerCase())) && (filter === "all" || (customer.status ?? "active") === filter);
   }), [customers, filter, query]);
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const rows = filtered.slice((page - 1) * pageSize, page * pageSize);
-  const loyaltyTotal = filtered.reduce((sum, customer) => sum + customer.loyaltyPoints, 0);
   const receivable = filtered.reduce((sum, customer) => sum + customer.balance, 0);
-  const creditLimit = filtered.reduce((sum, customer) => sum + customer.creditLimit, 0);
+  const totalPurchases = filtered.reduce((sum, customer) => sum + Number((customer as Customer & { totalPurchases?: number }).totalPurchases ?? 0), 0);
 
   const save = useMutation({
     mutationFn: () => {
-      const payload = { ...form, loyaltyPoints: Number(form.loyaltyPoints || 0), creditLimit: Number(form.creditLimit || 0), openingBalance: Number(form.openingBalance || 0) };
+      const payload = { ...form };
       return editing ? api.updateCustomer(editing.id, payload).then((result) => result as unknown) : api.createCustomer(payload).then((result) => result as unknown);
     },
     onSuccess: async () => { setFormOpen(false); setEditing(null); setForm(emptyForm); await queryClient.invalidateQueries({ queryKey: ["customers"] }); }
@@ -52,20 +49,19 @@ export default function Customers() {
 
   function openEdit(customer?: Customer) {
     setEditing(customer ?? null);
-    setForm(customer ? { name: customer.name, phone: customer.phone ?? "", email: customer.email ?? "", address: customer.address ?? "", loyaltyPoints: String(customer.loyaltyPoints), creditLimit: String(customer.creditLimit), openingBalance: String(customer.balance) } : emptyForm);
+    setForm(customer ? { name: customer.name, phone: customer.phone ?? "", email: customer.email ?? "", address: customer.address ?? "" } : emptyForm);
     setFormOpen(true);
   }
 
-  const exportRows = filtered.map((customer) => ({ name: customer.name, phone: customer.phone ?? "", email: customer.email ?? "", address: customer.address ?? "", loyaltyPoints: customer.loyaltyPoints, creditLimit: customer.creditLimit, balance: customer.balance, status: customer.status ?? "active" }));
+  const exportRows = filtered.map((customer) => ({ name: customer.name, phone: customer.phone ?? "", email: customer.email ?? "", address: customer.address ?? "", purchases: Number((customer as Customer & { totalPurchases?: number }).totalPurchases ?? 0), status: customer.status ?? "active" }));
 
   return (
     <Screen>
       <ScrollView contentContainerStyle={styles.content}>
-        <PageHeader eyebrow="Relationships" title="Customers" description="Customer profiles, sales interactions, loyalty, credit, balances and payments." actions={<CommandButton icon="plus" label="New customer" primary onPress={() => openEdit()} />} />
+        <PageHeader eyebrow="Relationships" title="Customers" description="Customer profiles, purchase history, linked sales and payments." actions={<CommandButton icon="plus" label="New customer" primary onPress={() => openEdit()} />} />
         <View style={styles.metrics}>
           <MetricCard label="Customers" value={filtered.length} icon="account-group-outline" />
-          <MetricCard label="Loyalty points" value={loyaltyTotal} tone="warning" icon="star-circle-outline" />
-          <MetricCard label="Credit limits" value={formatMwk(creditLimit)} icon="credit-card-outline" />
+          <MetricCard label="Sales value" value={formatMwk(totalPurchases)} tone="accent" icon="cart-check" />
           <MetricCard label="Receivable" value={formatMwk(receivable)} tone={receivable ? "danger" : "default"} icon="cash-clock" />
         </View>
         <TableCard>
@@ -74,13 +70,12 @@ export default function Customers() {
             <Filter value={filter} setValue={(value) => { setFilter(value); setPage(1); }} />
             <ExportMenu title="customers" rows={exportRows} />
           </View>
-          <TableHeader columns={["Customer", "Contact", "Loyalty", "Credit limit", "Balance", "Status", ""]} />
+          <TableHeader columns={["Customer", "Contact", "Sales", "Balance", "Status", ""]} />
           {rows.map((customer) => (
             <Pressable key={customer.id} style={styles.row} onPress={() => setDetailFor(customer)}>
               <View style={styles.customerCell}><Text style={styles.name}>{customer.name}</Text><Text style={styles.meta}>{customer.address || customer.id}</Text></View>
               <Text style={styles.contact}>{customer.phone || "-"}{"\n"}{customer.email || ""}</Text>
-              <View style={styles.cell}>{customer.loyaltyPoints ? <Badge tone="warning">{customer.loyaltyPoints}</Badge> : <Text style={styles.emptyText}>-</Text>}</View>
-              <Text style={styles.rightCell}>{customer.creditLimit ? formatMwk(customer.creditLimit) : "-"}</Text>
+              <Text style={styles.rightCell}>{formatMwk(Number((customer as Customer & { totalPurchases?: number }).totalPurchases ?? 0))}</Text>
               <Text style={[styles.rightCell, customer.balance > 0 && { color: colors.danger }]}>{customer.balance ? formatMwk(customer.balance) : "-"}</Text>
               <View style={styles.cell}><Badge tone={(customer.status ?? "active") === "active" ? "success" : "warning"}>{customer.status ?? "active"}</Badge></View>
               <Pressable style={styles.iconButton} onPress={() => setMenuFor(customer)}><MaterialCommunityIcons name="dots-vertical" size={18} color={colors.ink} /></Pressable>
@@ -97,7 +92,7 @@ export default function Customers() {
 }
 
 function Filter({ value, setValue }: { value: string; setValue: (value: string) => void }) {
-  return <View style={styles.filterRow}>{["all", "active", "archived", "credit", "loyalty"].map((item) => <Pressable key={item} style={[styles.chip, value === item && styles.chipActive]} onPress={() => setValue(item)}><Text style={[styles.chipText, value === item && styles.chipTextActive]}>{item}</Text></Pressable>)}</View>;
+  return <View style={styles.filterRow}>{["all", "active", "suspended", "disabled"].map((item) => <Pressable key={item} style={[styles.chip, value === item && styles.chipActive]} onPress={() => setValue(item)}><Text style={[styles.chipText, value === item && styles.chipTextActive]}>{item}</Text></Pressable>)}</View>;
 }
 
 function Pagination({ page, pages, onPrev, onNext }: { page: number; pages: number; onPrev: () => void; onNext: () => void }) {
@@ -105,7 +100,7 @@ function Pagination({ page, pages, onPrev, onNext }: { page: number; pages: numb
 }
 
 function CustomerModal({ open, editing, form, setForm, saving, error, onClose, onSave }: { open: boolean; editing: Customer | null; form: CustomerForm; setForm: (f: CustomerForm) => void; saving: boolean; error: unknown; onClose: () => void; onSave: () => void }) {
-  return <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}><Pressable style={styles.backdrop} onPress={onClose}><Pressable style={styles.panel}><Text style={styles.modalTitle}>{editing ? "Edit customer" : "New customer"}</Text><Field value={form.name} onChangeText={(name) => setForm({ ...form, name })} placeholder="Customer name" /><View style={styles.grid}><Field style={styles.gridField} value={form.phone} onChangeText={(phone) => setForm({ ...form, phone })} placeholder="Phone" /><Field style={styles.gridField} value={form.email} onChangeText={(email) => setForm({ ...form, email })} placeholder="Email" /></View><Field value={form.address} onChangeText={(address) => setForm({ ...form, address })} placeholder="Address" /><View style={styles.grid}><Field style={styles.gridField} value={form.loyaltyPoints} onChangeText={(loyaltyPoints) => setForm({ ...form, loyaltyPoints })} keyboardType="numeric" placeholder="Loyalty points" /><Field style={styles.gridField} value={form.creditLimit} onChangeText={(creditLimit) => setForm({ ...form, creditLimit })} keyboardType="numeric" placeholder="Credit limit" /><Field style={styles.gridField} value={form.openingBalance} onChangeText={(openingBalance) => setForm({ ...form, openingBalance })} keyboardType="numeric" placeholder="Balance" /></View>{error ? <Text style={styles.error}>{error instanceof Error ? error.message : "Save failed"}</Text> : null}<View style={styles.actions}><Button variant="outline" onPress={onClose}>Cancel</Button><Button onPress={onSave} disabled={saving || !form.name.trim()}>Save</Button></View></Pressable></Pressable></Modal>;
+  return <Modal visible={open} transparent animationType="fade" onRequestClose={onClose}><Pressable style={styles.backdrop} onPress={onClose}><Pressable style={styles.panel}><Text style={styles.modalTitle}>{editing ? "Edit customer" : "New customer"}</Text><Field value={form.name} onChangeText={(name) => setForm({ ...form, name })} placeholder="Customer name" /><View style={styles.grid}><Field style={styles.gridField} value={form.phone} onChangeText={(phone) => setForm({ ...form, phone })} placeholder="Phone" /><Field style={styles.gridField} value={form.email} onChangeText={(email) => setForm({ ...form, email })} placeholder="Email" /></View><Field value={form.address} onChangeText={(address) => setForm({ ...form, address })} placeholder="Address" />{error ? <Text style={styles.error}>{error instanceof Error ? error.message : "Save failed"}</Text> : null}<View style={styles.actions}><Button variant="outline" onPress={onClose}>Cancel</Button><Button onPress={onSave} disabled={saving || !form.name.trim()}>Save</Button></View></Pressable></Pressable></Modal>;
 }
 
 function ActionMenu({ customer, onClose, onEdit, onView, onSuspend, onDelete }: { customer: Customer | null; onClose: () => void; onEdit: (c: Customer) => void; onView: (c: Customer) => void; onSuspend: (c: Customer) => void; onDelete: (c: Customer) => void }) {
@@ -119,9 +114,9 @@ function MenuButton({ label, icon, onPress, danger }: { label: string; icon: key
 
 function DetailModal({ customer, data, loading, paymentAmount, setPaymentAmount, onPayment, onClose }: { customer: Customer | null; data: Record<string, unknown> | undefined; loading: boolean; paymentAmount: string; setPaymentAmount: (v: string) => void; onPayment: () => void; onClose: () => void }) {
   const sales = Array.isArray(data?.sales) ? data.sales as Record<string, unknown>[] : [];
-  const loyalty = Array.isArray(data?.loyalty) ? data.loyalty as Record<string, unknown>[] : [];
-  const exportRows = [...sales.map((x) => ({ type: "sale", ref: x.refNo, total: x.total, status: x.status })), ...loyalty.map((x) => ({ type: "loyalty", ref: x.id, points: x.points, status: x.refType }))];
-  return <Modal visible={Boolean(customer)} transparent animationType="fade" onRequestClose={onClose}><Pressable style={styles.backdrop} onPress={onClose}><Pressable style={styles.detailPanel}><View style={styles.detailHeader}><Text style={styles.modalTitle}>{customer?.name}</Text><ExportMenu title={`${customer?.name}-history`} rows={exportRows} /></View>{loading ? <Text style={styles.mutedText}>Loading...</Text> : <ScrollView contentContainerStyle={styles.detailBody}><Chart rows={sales} /><Text style={styles.sectionTitle}>Record payment</Text><View style={styles.paymentRow}><Field value={paymentAmount} onChangeText={setPaymentAmount} keyboardType="numeric" placeholder="Payment amount" style={{ flex: 1 }} /><Button onPress={onPayment} disabled={!Number(paymentAmount)}>Save payment</Button></View><Section title="Sales and orders" rows={sales} /><Section title="Loyalty activity" rows={loyalty} /></ScrollView>}</Pressable></Pressable></Modal>;
+  const payments = Array.isArray(data?.payments) ? data.payments as Record<string, unknown>[] : [];
+  const exportRows = [...sales.map((x) => ({ type: "sale", ref: x.ref_no ?? x.refNo, total: x.total, status: x.status })), ...payments.map((x) => ({ type: "payment", ref: x.id, total: x.amount, status: x.method }))];
+  return <Modal visible={Boolean(customer)} transparent animationType="fade" onRequestClose={onClose}><Pressable style={styles.backdrop} onPress={onClose}><Pressable style={styles.detailPanel}><View style={styles.detailHeader}><Text style={styles.modalTitle}>{customer?.name}</Text><ExportMenu title={`${customer?.name}-history`} rows={exportRows} /></View>{loading ? <Text style={styles.mutedText}>Loading...</Text> : <ScrollView contentContainerStyle={styles.detailBody}><Chart rows={sales} /><Text style={styles.sectionTitle}>Record payment</Text><View style={styles.paymentRow}><Field value={paymentAmount} onChangeText={setPaymentAmount} keyboardType="numeric" placeholder="Payment amount" style={{ flex: 1 }} /><Button onPress={onPayment} disabled={!Number(paymentAmount)}>Save payment</Button></View><Section title="Sales and orders" rows={sales} /><Section title="Payments" rows={payments} /></ScrollView>}</Pressable></Pressable></Modal>;
 }
 
 function Chart({ rows }: { rows: Record<string, unknown>[] }) {
