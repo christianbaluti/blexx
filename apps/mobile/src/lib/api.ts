@@ -40,7 +40,7 @@ import { readCacheAsync, saveCache } from "./localDb";
 import { getAuthToken } from "./sessionStore";
 
 const API_PORT = "4000";
-const PRODUCTION_API_URL = "https://blexx-api.vercel.app";
+const PRODUCTION_API_URL = "https://blexx-api-ms2z.vercel.app";
 
 function cleanUrl(url: string) {
   return url.replace(/\/+$/, "");
