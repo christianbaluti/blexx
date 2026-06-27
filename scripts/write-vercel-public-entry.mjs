@@ -10,6 +10,11 @@ const entries = [
     contents: `import { handleVercelRequest } from "./dist/vercel.js";\n\nexport default handleVercelRequest;\n`
   },
   {
+    dir: join(process.cwd(), "api"),
+    filename: "package.json",
+    contents: `{"type":"module"}\n`
+  },
+  {
     dir: join(process.cwd(), "public"),
     filename: "server.mjs",
     contents: `import Fastify from "fastify";\nimport { createApp } from "../apps/api/dist/app.js";\n\nFastify;\n\nconst fastify = await createApp();\nfastify.listen({ port: Number(process.env.PORT ?? 3000) });\n`
