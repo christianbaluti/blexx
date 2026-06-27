@@ -1,31 +1,28 @@
-.git
-.DS_Store
-.env
-.env.*
+# Vercel deploys only the Fastify API. Keep the archive tiny by defaulting
+# to ignored and explicitly allowing the workspace files needed by the API.
+*
+
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.json
+!tsconfig.base.json
+!vercel.json
 !.env.example
 
-node_modules
-**/node_modules
-.pnpm-store
+!apps/
+!apps/api/
+!apps/api/package.json
+!apps/api/tsconfig.json
+!apps/api/src/
+!apps/api/src/**
 
-.expo
-**/.expo
-dist
-**/dist
-build
-**/build
-builds
-coverage
+!packages/
+!packages/shared/
+!packages/shared/package.json
+!packages/shared/tsconfig.json
+!packages/shared/src/
+!packages/shared/src/**
 
-apps/mobile/.expo
-apps/mobile/dist
-apps/mobile/android
-apps/mobile/ios
-apps/desktop/dist
-apps/desktop/out
-
-*.log
-npm-debug.log*
-pnpm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+!scripts/
+!scripts/**
