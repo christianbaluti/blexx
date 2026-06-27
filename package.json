@@ -39,8 +39,19 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
+    "@blex/shared": "workspace:*",
+    "@fastify/cors": "^11.2.0",
+    "@fastify/jwt": "^10.1.0",
+    "@fastify/sensible": "^6.0.4",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
+    "nodemailer": "^9.0.1",
+    "pdfkit": "^0.19.1",
+    "pg": "^8.22.0",
     "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react-dom": "19.1.0",
+    "zod": "^3.25.76"
   },
   "overrides": {
     "react": "19.1.0",
