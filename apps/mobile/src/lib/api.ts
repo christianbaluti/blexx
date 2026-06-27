@@ -417,6 +417,9 @@ export const api = {
   emailPurchaseOrder(id: string) {
     return request<{ ok: boolean; message?: string }>(`/purchase-orders/${id}/email`, { method: "POST" });
   },
+  purchaseOrderPdf(id: string) {
+    return request<{ filename: string; mimeType: string; data: string }>(`/purchase-orders/${id}/pdf`);
+  },
   createGrn(payload: Record<string, unknown>) {
     return request<{ id: string; refNo: string }>("/grns", { method: "POST", body: JSON.stringify(payload) });
   },

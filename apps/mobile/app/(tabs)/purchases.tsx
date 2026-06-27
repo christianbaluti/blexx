@@ -2,8 +2,6 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
-import * as Print from "expo-print";
-import * as Sharing from "expo-sharing";
 import { type ComponentProps, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { formatMwk } from "@blex/shared";
@@ -11,6 +9,7 @@ import { Badge, CommandButton, EmptyPanel, MetricCard, PageHeader, TableCard, Ta
 import { ExportMenu } from "../../src/components/export-menu";
 import { Button, Card, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
+import { saveBase64File } from "../../src/lib/exportData";
 import { colors, typography } from "../../src/lib/theme";
 
 type PoLine = { name: string; description: string; imageData: string | null; unit: string; quantity: string; unitCost: string };
@@ -347,23 +346,15 @@ function PurchaseOrderDetail({ id, data, loading, onBack }: { id: string; data: 
     onSuccess: (result) => Alert.alert("Purchase order email", result.message ?? "Email queued."),
     onError: (error) => Alert.alert("Could not email purchase order", error instanceof Error ? error.message : "Download the PDF and send it manually.")
   });
+  const download = useMutation({
+    mutationFn: () => api.purchaseOrderPdf(id),
+    onSuccess: async (file) => {
+      await saveBase64File(file.filename, file.data, file.mimeType);
+    },
+    onError: (error) => Alert.alert("Could not download purchase order", error instanceof Error ? error.message : "Please try again.")
+  });
   const items = Array.isArray(data?.items) ? data.items as Record<string, unknown>[] : [];
   const title = cell(data?.refNo ?? data?.ref_no ?? "Purchase order");
-
-  async function sharePdf() {
-    if (!data) return;
-    try {
-      const file = await Print.printToFileAsync({ html: purchaseOrderHtml(data, items) });
-      const canShare = await Sharing.isAvailableAsync();
-      if (!canShare) {
-        await Print.printAsync({ uri: file.uri });
-        return;
-      }
-      await Sharing.shareAsync(file.uri, { mimeType: "application/pdf", UTI: "com.adobe.pdf", dialogTitle: `${title} PDF` });
-    } catch (error) {
-      Alert.alert("Could not create PDF", error instanceof Error ? error.message : "Please try again.");
-    }
-  }
 
   return (
     <Screen>
@@ -371,7 +362,7 @@ function PurchaseOrderDetail({ id, data, loading, onBack }: { id: string; data: 
         <View style={styles.detailHeader}>
           <CommandButton icon="arrow-left" label="Purchases" onPress={onBack} />
           <View style={styles.detailActions}>
-            <CommandButton icon="file-pdf-box" label="Download PDF" onPress={sharePdf} />
+            <CommandButton icon="file-pdf-box" label={download.isPending ? "Preparing..." : "Download PDF"} onPress={() => download.mutate()} />
             <CommandButton icon="email-outline" label={email.isPending ? "Sending..." : "Email supplier"} primary onPress={() => email.mutate()} />
           </View>
         </View>
@@ -408,11 +399,6 @@ function PurchaseOrderDetail({ id, data, loading, onBack }: { id: string; data: 
       </ScrollView>
     </Screen>
   );
-}
-
-function purchaseOrderHtml(data: Record<string, unknown>, items: Record<string, unknown>[]) {
-  const rows = items.map((line) => `<tr><td>${cell(line.name)}</td><td>${cell(line.unit)}</td><td>${cell(line.quantity)}</td><td>${formatMwk(Number(line.unitCost ?? 0))}</td><td>${formatMwk(Number(line.lineTotal ?? 0))}</td></tr>`).join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:#221e1a}table{width:100%;border-collapse:collapse;margin-top:20px}td,th{border:1px solid #ddd;padding:8px;font-size:12px}th{background:#f4f1eb;text-align:left}.total{text-align:right;font-weight:700}.muted{color:#766d63}</style></head><body><h1>Purchase Order ${cell(data.refNo ?? data.ref_no)}</h1><p class="muted">Supplier: ${cell(data.supplierName)} ${data.supplierEmail ? `(${cell(data.supplierEmail)})` : ""}</p><p class="muted">Date: ${cell(data.date ?? data.order_date)}</p><table><thead><tr><th>Item</th><th>Unit</th><th>Qty</th><th>Unit cost</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table><p class="total">Subtotal: ${formatMwk(Number(data.subtotal ?? 0))}</p><p class="total">Landed costs: ${formatMwk(Number(data.landedCost ?? data.landed_cost ?? 0))}</p><p class="total">Total: ${formatMwk(Number(data.total ?? 0))}</p><p>${cell(data.note ?? "")}</p></body></html>`;
 }
 
 function LoadingRow({ label }: { label: string }) {

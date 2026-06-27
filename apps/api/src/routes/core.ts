@@ -30,46 +30,131 @@ function formatMoney(value: unknown) {
   return `MWK ${money(value).toLocaleString("en-MW", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function pdfText(value: unknown) {
+  return String(value ?? "").trim();
+}
+
 function createPurchaseOrderPdf(order: Record<string, unknown>, items: Record<string, unknown>[]) {
   return new Promise<Buffer>((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 48 });
+    const doc = new PDFDocument({ size: "A4", margin: 42, bufferPages: true });
     const chunks: Buffer[] = [];
     doc.on("data", (chunk: Buffer) => chunks.push(chunk));
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
-    doc.fontSize(22).text(`Purchase Order ${String(order.refNo ?? order.ref_no ?? "")}`, { continued: false });
-    doc.moveDown(0.5);
-    doc.fontSize(10).fillColor("#555").text(`Supplier: ${String(order.supplierName ?? "")}`);
-    if (order.supplierEmail) doc.text(`Email: ${String(order.supplierEmail)}`);
-    doc.text(`Date: ${String(order.date ?? order.order_date ?? "")}`);
-    doc.moveDown();
+    const page = { left: 42, right: 553, bottom: 760 };
+    const refNo = pdfText(order.refNo ?? order.ref_no);
+    const companyName = pdfText(order.companyName) || "POS & Inventory +";
+    const column = {
+      item: { x: 50, width: 205 },
+      unit: { x: 265, width: 48 },
+      qty: { x: 318, width: 52 },
+      cost: { x: 378, width: 78 },
+      total: { x: 464, width: 82 }
+    };
 
-    doc.fillColor("#111").fontSize(11).text("Item", 48, doc.y, { width: 210, continued: true });
-    doc.text("Unit", { width: 70, continued: true });
-    doc.text("Qty", { width: 70, align: "right", continued: true });
-    doc.text("Unit cost", { width: 90, align: "right", continued: true });
-    doc.text("Total", { width: 90, align: "right" });
-    doc.moveTo(48, doc.y + 4).lineTo(548, doc.y + 4).strokeColor("#ddd").stroke();
-    doc.moveDown(0.7);
+    function drawHeader() {
+      doc.fillColor("#221e1a").font("Helvetica-Bold").fontSize(20).text(companyName, page.left, 42, { width: 290 });
+      doc.font("Helvetica-Bold").fontSize(17).text("PURCHASE ORDER", 330, 42, { width: 223, align: "right" });
+      doc.font("Helvetica").fontSize(10).fillColor("#6f665c").text(refNo, 330, 65, { width: 223, align: "right" });
+      doc.moveTo(page.left, 92).lineTo(page.right, 92).strokeColor("#d8d0c5").lineWidth(1).stroke();
 
-    for (const item of items) {
-      const y = doc.y;
-      doc.fillColor("#111").fontSize(10).text(String(item.name ?? ""), 48, y, { width: 210 });
-      doc.text(String(item.unit ?? ""), 258, y, { width: 70 });
-      doc.text(String(item.quantity ?? ""), 328, y, { width: 70, align: "right" });
-      doc.text(formatMoney(item.unitCost), 398, y, { width: 90, align: "right" });
-      doc.text(formatMoney(item.lineTotal), 488, y, { width: 60, align: "right" });
-      doc.moveDown(0.8);
+      const infoTop = 108;
+      doc.fillColor("#9a5529").font("Helvetica-Bold").fontSize(9).text("SUPPLIER", page.left, infoTop);
+      doc.fillColor("#221e1a").fontSize(11).text(pdfText(order.supplierName), page.left, infoTop + 15, { width: 235 });
+      doc.font("Helvetica").fontSize(9).fillColor("#5f564d");
+      if (order.supplierEmail) doc.text(pdfText(order.supplierEmail), page.left, doc.y + 3, { width: 235 });
+      if (order.supplierPhone) doc.text(pdfText(order.supplierPhone), page.left, doc.y + 3, { width: 235 });
+      if (order.supplierAddress) doc.text(pdfText(order.supplierAddress), page.left, doc.y + 3, { width: 235 });
+
+      const metaX = 330;
+      const metaRows = [
+        ["PO number", refNo],
+        ["Order date", pdfText(order.date ?? order.order_date)],
+        ["Status", pdfText(order.status) || "ordered"]
+      ];
+      let metaY = infoTop;
+      for (const [label, value] of metaRows) {
+        doc.fillColor("#6f665c").font("Helvetica-Bold").fontSize(9).text(label, metaX, metaY, { width: 88 });
+        doc.fillColor("#221e1a").font("Helvetica").fontSize(9).text(value || "-", metaX + 96, metaY, { width: 127, align: "right" });
+        metaY += 17;
+      }
+      doc.y = 205;
     }
 
-    doc.moveDown();
-    doc.fontSize(11).text(`Subtotal: ${formatMoney(order.subtotal)}`, { align: "right" });
-    doc.text(`Landed costs: ${formatMoney(order.landedCost ?? order.landed_cost)}`, { align: "right" });
-    doc.fontSize(13).text(`Total: ${formatMoney(order.total)}`, { align: "right" });
+    function drawTableHeader(y: number) {
+      doc.rect(page.left, y, page.right - page.left, 24).fill("#f4f1eb");
+      doc.fillColor("#5b5147").font("Helvetica-Bold").fontSize(8);
+      doc.text("ITEM", column.item.x, y + 8, { width: column.item.width });
+      doc.text("UNIT", column.unit.x, y + 8, { width: column.unit.width });
+      doc.text("QTY", column.qty.x, y + 8, { width: column.qty.width, align: "right" });
+      doc.text("UNIT COST", column.cost.x, y + 8, { width: column.cost.width, align: "right" });
+      doc.text("LINE TOTAL", column.total.x, y + 8, { width: column.total.width, align: "right" });
+      doc.strokeColor("#d8d0c5").rect(page.left, y, page.right - page.left, 24).stroke();
+      doc.y = y + 24;
+    }
+
+    function ensureSpace(height: number) {
+      if (doc.y + height <= page.bottom) return;
+      doc.addPage();
+      drawTableHeader(54);
+    }
+
+    drawHeader();
+    drawTableHeader(doc.y);
+
+    for (const item of items) {
+      const itemName = pdfText(item.name) || "Item";
+      const rowHeight = Math.max(28, doc.heightOfString(itemName, { width: column.item.width }) + 14);
+      ensureSpace(rowHeight);
+      const y = doc.y;
+      doc.rect(page.left, y, page.right - page.left, rowHeight).fill(items.indexOf(item) % 2 ? "#fbfaf7" : "#ffffff");
+      doc.fillColor("#221e1a").font("Helvetica").fontSize(9);
+      doc.text(itemName, column.item.x, y + 8, { width: column.item.width });
+      doc.text(pdfText(item.unit) || "-", column.unit.x, y + 8, { width: column.unit.width });
+      doc.text(pdfText(item.quantity) || "0", column.qty.x, y + 8, { width: column.qty.width, align: "right" });
+      doc.text(formatMoney(item.unitCost), column.cost.x, y + 8, { width: column.cost.width, align: "right" });
+      doc.text(formatMoney(item.lineTotal), column.total.x, y + 8, { width: column.total.width, align: "right" });
+      doc.strokeColor("#e1dbd2").rect(page.left, y, page.right - page.left, rowHeight).stroke();
+      doc.y = y + rowHeight;
+    }
+
+    ensureSpace(138);
+    doc.moveDown(1);
+    const totalsX = 348;
+    const totals = [
+      ["Subtotal", formatMoney(order.subtotal)],
+      ["Landed costs", formatMoney(order.landedCost ?? order.landed_cost)],
+      ["Total", formatMoney(order.total)]
+    ];
+    let totalsY = doc.y;
+    for (const [label, value] of totals) {
+      const isTotal = label === "Total";
+      if (isTotal) doc.rect(totalsX - 8, totalsY - 5, 205, 24).fill("#f4f1eb");
+      doc.fillColor(isTotal ? "#9a5529" : "#5f564d").font(isTotal ? "Helvetica-Bold" : "Helvetica").fontSize(isTotal ? 12 : 10);
+      doc.text(label, totalsX, totalsY, { width: 80 });
+      doc.text(value, totalsX + 83, totalsY, { width: 105, align: "right" });
+      totalsY += isTotal ? 27 : 20;
+    }
+    doc.y = totalsY + 10;
+
     if (order.note) {
-      doc.moveDown();
-      doc.fontSize(10).fillColor("#555").text(String(order.note));
+      ensureSpace(74);
+      doc.fillColor("#9a5529").font("Helvetica-Bold").fontSize(9).text("NOTES", page.left, doc.y);
+      doc.fillColor("#5f564d").font("Helvetica").fontSize(9).text(pdfText(order.note), page.left, doc.y + 8, { width: 300 });
+    }
+
+    ensureSpace(62);
+    const signY = Math.max(doc.y + 22, 690);
+    doc.strokeColor("#d8d0c5").moveTo(page.left, signY).lineTo(250, signY).stroke();
+    doc.moveTo(345, signY).lineTo(page.right, signY).stroke();
+    doc.fillColor("#6f665c").font("Helvetica").fontSize(8).text("Prepared by", page.left, signY + 6);
+    doc.text("Supplier acceptance", 345, signY + 6);
+
+    const range = doc.bufferedPageRange();
+    for (let index = range.start; index < range.start + range.count; index += 1) {
+      doc.switchToPage(index);
+      doc.fillColor("#8b8176").font("Helvetica").fontSize(8).text(`Page ${index + 1} of ${range.count}`, page.left, 802, { width: page.right - page.left, align: "center" });
     }
     doc.end();
   });
@@ -580,11 +665,11 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     return { ...row, subtotal: money(row.subtotal), landedCost: money(row.landed_cost), total: money(row.total), items: lines.rows.map((line) => ({ ...line, quantity: numberify(line.quantity), unitCost: money(line.unitCost), lineTotal: money(line.lineTotal) })) };
   });
 
-  app.post("/purchase-orders/:id/email", async (request) => {
-    const { id } = idParam.parse(request.params);
+  async function purchaseOrderPdfPayload(id: string) {
     const [orderResult, linesResult, settingsResult] = await Promise.all([
       pool.query(
-        `select po.*, po.ref_no as "refNo", po.order_date as "date", s.email as "supplierEmail", s.name as "supplierName"
+        `select po.*, po.ref_no as "refNo", po.order_date as "date",
+                s.email as "supplierEmail", s.name as "supplierName", s.phone as "supplierPhone", s.address as "supplierAddress"
          from purchase_orders po join suppliers s on s.id = po.supplier_id where po.id = $1`,
         [id]
       ),
@@ -598,24 +683,43 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     ]);
     const row = orderResult.rows[0];
     if (!row) throw app.httpErrors.notFound("Purchase order not found");
+    const settings = settingsResult.rows[0]?.value as { company?: { tradingName?: string }; emailTemplates?: { purchaseOrderSubject?: string; purchaseOrderBody?: string } } | undefined;
+    const companyName = settings?.company?.tradingName ?? "POS & Inventory +";
+    const refNo = String(row.refNo ?? row.ref_no);
+    const pdf = await createPurchaseOrderPdf({ ...row, companyName }, linesResult.rows);
+    return { row, lines: linesResult.rows, settings, companyName, refNo, pdf };
+  }
+
+  app.get("/purchase-orders/:id/pdf", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const payload = await purchaseOrderPdfPayload(id);
+    return {
+      filename: `${payload.refNo}.pdf`,
+      mimeType: "application/pdf",
+      data: payload.pdf.toString("base64")
+    };
+  });
+
+  app.post("/purchase-orders/:id/email", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const { row, settings, companyName, refNo, pdf } = await purchaseOrderPdfPayload(id);
+    if (!row) throw app.httpErrors.notFound("Purchase order not found");
     if (!row.supplierEmail) throw app.httpErrors.badRequest("Supplier does not have an email address.");
     if (!config.smtpHost || !config.smtpUser || !config.smtpPass) throw app.httpErrors.serviceUnavailable("SMTP is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM and SMTP_SECURE on the backend.");
 
-    const settings = settingsResult.rows[0]?.value as { company?: { tradingName?: string }; emailTemplates?: { purchaseOrderSubject?: string; purchaseOrderBody?: string } } | undefined;
     const values = {
-      refNo: String(row.refNo ?? row.ref_no),
+      refNo,
       supplierName: String(row.supplierName ?? ""),
-      companyName: settings?.company?.tradingName ?? "POS & Inventory +"
+      companyName
     };
     const subject = renderTemplate(settings?.emailTemplates?.purchaseOrderSubject ?? "Purchase order {{refNo}} from {{companyName}}", values);
     const text = renderTemplate(settings?.emailTemplates?.purchaseOrderBody ?? "Dear {{supplierName}},\n\nPlease find attached purchase order {{refNo}}.\n\nRegards,\n{{companyName}}", values);
-    const pdf = await createPurchaseOrderPdf(row, linesResult.rows);
     await mailTransport().sendMail({
       from: config.smtpFrom,
       to: String(row.supplierEmail),
       subject,
       text,
-      attachments: [{ filename: `${values.refNo}.pdf`, content: pdf, contentType: "application/pdf" }]
+      attachments: [{ filename: `${refNo}.pdf`, content: pdf, contentType: "application/pdf" }]
     });
     return { ok: true, message: "Purchase order email sent." };
   });
