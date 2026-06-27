@@ -312,6 +312,10 @@ export interface AppSettings {
     lowStockEmailEnabled: boolean;
     expiryEmailEnabled: boolean;
   };
+  emailTemplates: {
+    purchaseOrderSubject: string;
+    purchaseOrderBody: string;
+  };
 }
 
 export const defaultAppSettings: AppSettings = {
@@ -334,6 +338,10 @@ export const defaultAppSettings: AppSettings = {
   notifications: {
     lowStockEmailEnabled: true,
     expiryEmailEnabled: true
+  },
+  emailTemplates: {
+    purchaseOrderSubject: "Purchase order {{refNo}} from {{companyName}}",
+    purchaseOrderBody: "Dear {{supplierName}},\n\nPlease find attached purchase order {{refNo}}.\n\nRegards,\n{{companyName}}"
   }
 };
 

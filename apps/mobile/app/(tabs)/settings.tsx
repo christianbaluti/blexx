@@ -244,12 +244,35 @@ export default function Settings() {
         ) : null}
 
         {tab === "integrations" ? (
-          <View style={styles.grid}>
-            <IntegrationCard icon="email-outline" title="SMTP email" env="SMTP_*" status="Configured by env" />
-            <IntegrationCard icon="message-text-outline" title="Africa's Talking SMS" env="AFRICASTALKING_*" status="Adapter ready" />
-            <IntegrationCard icon="cellphone-message" title="Expo Push" env="EXPO_ACCESS_TOKEN" status="Adapter ready" />
-            <IntegrationCard icon="database-export-outline" title="Backup directory" env="BACKUP_DIR" status="Local-first export" />
-          </View>
+          <>
+            <View style={styles.grid}>
+              <IntegrationCard icon="email-outline" title="SMTP email" env="SMTP_*" status="Configured by env" />
+              <IntegrationCard icon="message-text-outline" title="Africa's Talking SMS" env="AFRICASTALKING_*" status="Adapter ready" />
+              <IntegrationCard icon="cellphone-message" title="Expo Push" env="EXPO_ACCESS_TOKEN" status="Adapter ready" />
+              <IntegrationCard icon="database-export-outline" title="Backup directory" env="BACKUP_DIR" status="Local-first export" />
+            </View>
+            <Card style={styles.formCard}>
+              <Text style={styles.sectionTitle}>Purchase order email template</Text>
+              <Text style={styles.sectionText}>Used when sending purchase orders to suppliers. Available fields: {"{{refNo}}"}, {"{{supplierName}}"}, {"{{companyName}}"}.</Text>
+              <View style={styles.formGrid}>
+                <View style={styles.fieldBlockWide}>
+                  <Text style={styles.label}>Subject</Text>
+                  <Field value={settingsForm.emailTemplates.purchaseOrderSubject} onChangeText={(purchaseOrderSubject) => setSettingsForm((current) => ({ ...current, emailTemplates: { ...current.emailTemplates, purchaseOrderSubject } }))} />
+                </View>
+                <View style={styles.fieldBlockWide}>
+                  <Text style={styles.label}>Body</Text>
+                  <Field
+                    value={settingsForm.emailTemplates.purchaseOrderBody}
+                    onChangeText={(purchaseOrderBody) => setSettingsForm((current) => ({ ...current, emailTemplates: { ...current.emailTemplates, purchaseOrderBody } }))}
+                    multiline
+                    style={styles.textArea}
+                  />
+                </View>
+              </View>
+              {settingsError ? <Text style={styles.errorText}>{settingsError}</Text> : null}
+              <View style={styles.alignEnd}><CommandButton icon="content-save-outline" label={saveSettings.isPending ? "Saving..." : "Save template"} primary onPress={() => saveSettings.mutate(settingsForm)} /></View>
+            </Card>
+          </>
         ) : null}
 
         {tab === "backups" ? (
@@ -289,6 +312,7 @@ const styles = StyleSheet.create({
   formGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   fieldBlock: { flexGrow: 1, flexBasis: 260, gap: 6 },
   fieldBlockWide: { flexBasis: "100%", gap: 6 },
+  textArea: { minHeight: 116, paddingTop: 10, textAlignVertical: "top" },
   label: { color: colors.ink, fontSize: 12, fontWeight: "900" },
   alignEnd: { flexDirection: "row", justifyContent: "flex-end" },
   row: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 11 },

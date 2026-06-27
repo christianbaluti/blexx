@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { numberify, pool } from "../db.js";
+import { config } from "../config.js";
 
 type DbClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
@@ -99,10 +100,14 @@ const poSchema = z.object({
   landedCost: z.number().nonnegative().default(0),
   createdBy: z.string().uuid().nullable().optional(),
   items: z.array(z.object({
-    itemId: z.string().uuid(),
+    itemId: z.string().uuid().nullable().optional(),
+    name: z.string().trim().min(1).optional(),
+    description: nullableText,
+    unit: z.string().trim().default("ea"),
+    imageData: dataUrl,
     quantity: z.number().positive(),
     unitCost: z.number().nonnegative()
-  })).min(1)
+  }).refine((line) => Boolean(line.itemId || line.name), "Select an item or enter a new item name")).min(1)
 });
 
 const grnSchema = z.object({
@@ -204,6 +209,10 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     notifications: {
       lowStockEmailEnabled: false,
       expiryEmailEnabled: false
+    },
+    emailTemplates: {
+      purchaseOrderSubject: "Purchase order {{refNo}} from {{companyName}}",
+      purchaseOrderBody: "Dear {{supplierName}},\n\nPlease find attached purchase order {{refNo}}.\n\nRegards,\n{{companyName}}"
     }
   };
 
@@ -218,11 +227,27 @@ export async function registerCoreRoutes(app: FastifyInstance) {
   app.patch("/settings/branding", async (request) => request.body);
 
   app.get("/settings", async () => {
-    return defaultSettings;
+    const result = await pool.query("select value from app_settings where key = 'settings'");
+    const saved = result.rows[0]?.value as Partial<typeof defaultSettings> | undefined;
+    return {
+      ...defaultSettings,
+      ...saved,
+      company: { ...defaultSettings.company, ...saved?.company },
+      downloads: { ...defaultSettings.downloads, ...saved?.downloads },
+      security: { ...defaultSettings.security, ...saved?.security },
+      notifications: { ...defaultSettings.notifications, ...saved?.notifications },
+      emailTemplates: { ...defaultSettings.emailTemplates, ...saved?.emailTemplates }
+    };
   });
 
   app.patch("/settings", async (request) => {
-    return request.body ?? defaultSettings;
+    const value = request.body ?? defaultSettings;
+    await pool.query(
+      `insert into app_settings (key, value) values ('settings', $1::jsonb)
+       on conflict (key) do update set value = excluded.value`,
+      [JSON.stringify(value)]
+    );
+    return value;
   });
 
   app.get("/sync/health", async () => ({ online: true, pending: 0, conflicts: 0, failed: 0, lastSyncedAt: new Date().toISOString() }));
@@ -274,25 +299,49 @@ export async function registerCoreRoutes(app: FastifyInstance) {
   app.patch("/suppliers/:id", async (request) => {
     const { id } = idParam.parse(request.params);
     const body = supplierSchema.partial().parse(request.body);
-    await pool.query(
-      `update suppliers set name = coalesce($2, name), phone = coalesce($3, phone), email = coalesce($4, email),
-       address = coalesce($5, address), note = coalesce($6, note), updated_at = now() where id = $1`,
-      [id, body.name ?? null, body.phone ?? null, body.email ?? null, body.address ?? null, body.note ?? null]
+    const result = await pool.query(
+      `update suppliers set
+        name = case when $2::boolean then $3 else name end,
+        phone = case when $4::boolean then $5 else phone end,
+        email = case when $6::boolean then $7 else email end,
+        address = case when $8::boolean then $9 else address end,
+        note = case when $10::boolean then $11 else note end,
+        updated_at = now()
+       where id = $1
+       returning id`,
+      [
+        id,
+        Object.prototype.hasOwnProperty.call(body, "name"), body.name ?? null,
+        Object.prototype.hasOwnProperty.call(body, "phone"), body.phone ?? null,
+        Object.prototype.hasOwnProperty.call(body, "email"), body.email ?? null,
+        Object.prototype.hasOwnProperty.call(body, "address"), body.address ?? null,
+        Object.prototype.hasOwnProperty.call(body, "note"), body.note ?? null
+      ]
     );
+    if (!result.rowCount) throw app.httpErrors.notFound("Supplier not found");
     return { ok: true };
   });
 
   app.delete("/suppliers/:id", async (request) => {
     const { id } = idParam.parse(request.params);
-    const linked = await pool.query("select 1 from purchase_orders where supplier_id = $1 union all select 1 from supplier_invoices where supplier_id = $1 limit 1", [id]);
+    const linked = await pool.query(
+      `select 1 from purchase_orders where supplier_id = $1
+       union all select 1 from grns where supplier_id = $1
+       union all select 1 from supplier_invoices where supplier_id = $1
+       union all select 1 from payments where supplier_id = $1
+       limit 1`,
+      [id]
+    );
     if (linked.rows.length) throw app.httpErrors.conflict("Supplier has activity. Suspend instead of deleting.");
-    await pool.query("delete from suppliers where id = $1", [id]);
+    const result = await pool.query("delete from suppliers where id = $1 returning id", [id]);
+    if (!result.rowCount) throw app.httpErrors.notFound("Supplier not found");
     return { ok: true };
   });
 
   app.post("/suppliers/:id/suspend", async (request) => {
     const { id } = idParam.parse(request.params);
-    await pool.query("update suppliers set status = 'suspended', updated_at = now() where id = $1", [id]);
+    const result = await pool.query("update suppliers set status = 'suspended', updated_at = now() where id = $1 returning id", [id]);
+    if (!result.rowCount) throw app.httpErrors.notFound("Supplier not found");
     return { ok: true };
   });
 
@@ -402,10 +451,22 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         [ref("PO"), body.supplierId, body.expectedDate ?? null, body.note ?? null, body.landedCost, subtotal, total, body.createdBy ?? null]
       );
       for (const line of body.items) {
+        let itemId = line.itemId;
+        if (!itemId) {
+          const existing = await client.query("select id from items where lower(name) = lower($1) and unit = $2 limit 1", [line.name, line.unit]);
+          itemId = existing.rows[0]?.id as string | undefined;
+        }
+        if (!itemId) {
+          const item = await client.query(
+            `insert into items (sku, name, unit, reorder_level) values ($1,$2,$3,0) returning id`,
+            [ref("ITM"), line.name, line.unit]
+          );
+          itemId = item.rows[0].id as string;
+        }
         await client.query(
           `insert into purchase_order_items (purchase_order_id, item_id, quantity, unit_cost, line_total)
            values ($1,$2,$3,$4,$5)`,
-          [po.rows[0].id, line.itemId, line.quantity, line.unitCost, line.quantity * line.unitCost]
+          [po.rows[0].id, itemId, line.quantity, line.unitCost, line.quantity * line.unitCost]
         );
       }
       await client.query("commit");
@@ -428,6 +489,44 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       order by po.created_at desc
     `);
     return result.rows.map((row) => ({ ...row, total: money(row.total), lineCount: Number(row.lineCount) }));
+  });
+
+  app.get("/purchase-orders/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const [purchaseOrder, lines] = await Promise.all([
+      pool.query(
+        `select po.*, po.ref_no as "refNo", po.order_date as "date", s.name as "supplierName", s.email as "supplierEmail", s.phone as "supplierPhone", s.address as "supplierAddress"
+         from purchase_orders po
+         join suppliers s on s.id = po.supplier_id
+         where po.id = $1`,
+        [id]
+      ),
+      pool.query(
+        `select poi.id, poi.quantity, poi.unit_cost as "unitCost", poi.line_total as "lineTotal",
+                i.id as "itemId", i.sku, i.name, i.unit
+         from purchase_order_items poi
+         join items i on i.id = poi.item_id
+         where poi.purchase_order_id = $1
+         order by poi.id`,
+        [id]
+      )
+    ]);
+    const row = purchaseOrder.rows[0];
+    if (!row) throw app.httpErrors.notFound("Purchase order not found");
+    return { ...row, subtotal: money(row.subtotal), landedCost: money(row.landed_cost), total: money(row.total), items: lines.rows.map((line) => ({ ...line, quantity: numberify(line.quantity), unitCost: money(line.unitCost), lineTotal: money(line.lineTotal) })) };
+  });
+
+  app.post("/purchase-orders/:id/email", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const result = await pool.query(
+      `select po.ref_no, s.email, s.name from purchase_orders po join suppliers s on s.id = po.supplier_id where po.id = $1`,
+      [id]
+    );
+    const row = result.rows[0];
+    if (!row) throw app.httpErrors.notFound("Purchase order not found");
+    if (!row.email) throw app.httpErrors.badRequest("Supplier does not have an email address.");
+    if (!config.smtpHost) throw app.httpErrors.serviceUnavailable("SMTP is not configured. Download the PDF and send it manually, or set SMTP_HOST and SMTP_FROM on the backend.");
+    return { ok: true, message: "Purchase order email queued." };
   });
 
   app.post("/grns", async (request, reply) => {

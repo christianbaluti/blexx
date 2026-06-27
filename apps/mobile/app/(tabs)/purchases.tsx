@@ -1,15 +1,19 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import * as ImagePicker from "expo-image-picker";
+import * as Print from "expo-print";
+import * as Sharing from "expo-sharing";
+import { type ComponentProps, useMemo, useState } from "react";
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { formatMwk } from "@blex/shared";
-import { Badge, CommandButton, EmptyPanel, MetricCard, PageHeader, TabBar, TableCard, TableHeader } from "../../src/components/feature-ui";
+import { Badge, CommandButton, EmptyPanel, MetricCard, PageHeader, TableCard, TableHeader } from "../../src/components/feature-ui";
 import { ExportMenu } from "../../src/components/export-menu";
 import { Button, Card, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
-type PurchaseTab = "po" | "grn" | "inv";
+type PoLine = { name: string; description: string; imageData: string | null; unit: string; quantity: string; unitCost: string };
+const emptyLine: PoLine = { name: "", description: "", imageData: null, unit: "ea", quantity: "1", unitCost: "0" };
 
 function statusTone(status: string) {
   if (["received", "paid", "closed"].includes(status)) return "success" as const;
@@ -18,176 +22,372 @@ function statusTone(status: string) {
   return "muted" as const;
 }
 
+function cell(value: unknown) {
+  return value == null ? "" : String(value);
+}
+
 export default function Purchases() {
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<PurchaseTab>("po");
+  const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [step, setStep] = useState<"supplier" | "items">("supplier");
   const [supplierId, setSupplierId] = useState("");
-  const [itemId, setItemId] = useState("");
-  const [quantity, setQuantity] = useState("1");
-  const [unitCost, setUnitCost] = useState("0");
+  const [lines, setLines] = useState<PoLine[]>([{ ...emptyLine }]);
   const [landedCost, setLandedCost] = useState("0");
   const [note, setNote] = useState("");
-  const { data: purchaseOrders = [], isLoading: loadingPurchaseOrders, isFetching: fetchingPurchaseOrders } = useQuery({ queryKey: ["purchase-orders"], queryFn: api.purchaseOrders });
-  const { data: grn = [], isLoading: loadingGrn, isFetching: fetchingGrn } = useQuery({ queryKey: ["grn"], queryFn: api.grn });
-  const { data: invoices = [], isLoading: loadingInvoices, isFetching: fetchingInvoices } = useQuery({ queryKey: ["supplier-invoices"], queryFn: api.supplierInvoices });
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const { data: purchaseOrders = [], isLoading, isFetching } = useQuery({ queryKey: ["purchase-orders"], queryFn: api.purchaseOrders });
   const { data: suppliers = [] } = useQuery({ queryKey: ["suppliers"], queryFn: api.suppliers });
-  const { data: items = [] } = useQuery({ queryKey: ["items"], queryFn: api.items });
-  const openPayables = invoices.reduce((sum, invoice) => sum + Math.max(0, invoice.total - invoice.paid), 0);
-  const activeLoading = tab === "po" ? loadingPurchaseOrders : tab === "grn" ? loadingGrn : loadingInvoices;
-  const activeFetching = tab === "po" ? fetchingPurchaseOrders : tab === "grn" ? fetchingGrn : fetchingInvoices;
-  const exportRows = useMemo(() => {
-    if (tab === "po") return purchaseOrders.map((po) => ({ ref: String((po as unknown as Record<string, unknown>).ref_no ?? po.id), supplier: po.supplierName ?? po.supplierId, date: String((po as unknown as Record<string, unknown>).order_date ?? po.date), status: po.status, total: po.total }));
-    if (tab === "grn") return grn.map((note) => ({ ref: note.refNo, purchaseOrder: note.poId ?? "", receivedAt: note.receivedAt, totalItems: note.totalItems, receivedBy: note.receivedBy ?? "" }));
-    return invoices.map((invoice) => ({ ref: invoice.refNo, supplier: invoice.supplierName, dueDate: invoice.dueDate ?? "", status: invoice.status, total: invoice.total, paid: invoice.paid }));
-  }, [grn, invoices, purchaseOrders, tab]);
+  const detail = useQuery({ queryKey: ["purchase-order-detail", detailId], queryFn: () => api.purchaseOrderDetail(detailId!), enabled: Boolean(detailId) });
+
+  const filtered = useMemo(() => purchaseOrders.filter((po) => {
+    const text = [cell((po as unknown as Record<string, unknown>).ref_no), po.supplierName ?? "", po.status].join(" ").toLowerCase();
+    return !query || text.includes(query.toLowerCase());
+  }), [purchaseOrders, query]);
+  const ordered = filtered.filter((po) => po.status === "ordered").length;
+  const totalValue = filtered.reduce((sum, po) => sum + Number(po.total ?? 0), 0);
+  const exportRows = filtered.map((po) => ({
+    ref: cell((po as unknown as Record<string, unknown>).ref_no ?? po.id),
+    supplier: po.supplierName ?? po.supplierId,
+    date: cell((po as unknown as Record<string, unknown>).order_date ?? po.date),
+    status: po.status,
+    lines: cell((po as unknown as Record<string, unknown>).lineCount ?? ""),
+    total: po.total
+  }));
+
   const create = useMutation({
     mutationFn: () => api.createPurchaseOrder({
       supplierId,
       landedCost: Number(landedCost || 0),
       note,
-      items: [{ itemId, quantity: Number(quantity || 0), unitCost: Number(unitCost || 0) }]
+      items: lines.map((line) => ({
+        name: line.name.trim(),
+        description: line.description.trim() || null,
+        imageData: line.imageData,
+        unit: line.unit.trim() || "ea",
+        quantity: Number(line.quantity || 0),
+        unitCost: Number(line.unitCost || 0)
+      }))
     }),
-    onSuccess: async () => {
+    onSuccess: async (created) => {
       setOpen(false);
+      resetForm();
       await queryClient.invalidateQueries({ queryKey: ["purchase-orders"] });
-    }
+      setDetailId(created.id);
+    },
+    onError: (error) => Alert.alert("Could not create purchase order", error instanceof Error ? error.message : "Please check the form and try again.")
   });
 
-  function openNew() {
-    setSupplierId(suppliers[0]?.id ?? "");
-    setItemId(String(items[0]?.id ?? ""));
-    setQuantity("1");
-    setUnitCost("0");
+  function resetForm() {
+    setStep("supplier");
+    setSupplierId("");
+    setLines([{ ...emptyLine }]);
     setLandedCost("0");
     setNote("");
+  }
+
+  function openNew() {
+    resetForm();
+    setSupplierId(suppliers.find((supplier) => (supplier.status ?? "active") === "active")?.id ?? suppliers[0]?.id ?? "");
     setOpen(true);
+  }
+
+  function updateLine(index: number, patch: Partial<PoLine>) {
+    setLines((current) => current.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line));
+  }
+
+  function removeLine(index: number) {
+    setLines((current) => current.length === 1 ? current : current.filter((_, lineIndex) => lineIndex !== index));
+  }
+
+  async function pickLineImage(index: number) {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert("Permission needed", "Photo library permission is required to attach an item picture.");
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.35, base64: true });
+    if (result.canceled) return;
+    const asset = result.assets[0];
+    if (!asset?.base64) return;
+    const dataUrl = `data:${asset.mimeType ?? "image/jpeg"};base64,${asset.base64}`;
+    if (dataUrl.length > 140_000) {
+      Alert.alert("Image too large", "Choose a smaller image. Product/order images must stay under about 100 KB.");
+      return;
+    }
+    updateLine(index, { imageData: dataUrl });
+  }
+
+  function validateAndContinue() {
+    if (!supplierId) {
+      Alert.alert("Choose supplier", "Select the supplier for this purchase order first.");
+      return;
+    }
+    setStep("items");
+  }
+
+  function submit() {
+    const invalid = lines.find((line) => !line.name.trim() || !Number(line.quantity) || Number(line.quantity) <= 0);
+    if (invalid) {
+      Alert.alert("Check items", "Each line needs an item name and quantity greater than zero.");
+      return;
+    }
+    create.mutate();
+  }
+
+  if (detailId) {
+    return <PurchaseOrderDetail id={detailId} data={detail.data} loading={detail.isLoading} onBack={() => setDetailId(null)} />;
   }
 
   return (
     <Screen>
       <ScrollView contentContainerStyle={styles.content}>
         <PageHeader
-          eyebrow="Operations"
-          title="Purchases"
-          description="Purchase orders, goods received notes and supplier invoices."
+          eyebrow="Purchasing"
+          title="Purchase Orders"
+          description="Create supplier purchase orders, export a PDF, and send order details to the supplier."
           actions={<CommandButton icon="plus" label="New PO" primary onPress={openNew} />}
         />
-        <View style={styles.metrics}>
-          <MetricCard label="Purchase orders" value={purchaseOrders.length} icon="cart-arrow-down" />
-          <MetricCard label="GRNs" value={grn.length} icon="package-variant-closed-check" />
-          <MetricCard label="Supplier invoices" value={invoices.length} icon="file-document-outline" />
-          <MetricCard label="Open payables" value={formatMwk(openPayables)} tone={openPayables ? "warning" : "default"} icon="cash-clock" />
-        </View>
-        <TabBar
-          active={tab}
-          onChange={setTab}
-          tabs={[
-            { key: "po", label: "Purchase orders" },
-            { key: "grn", label: "Goods received" },
-            { key: "inv", label: "Supplier invoices" }
-          ]}
-        />
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.metricsLine}>
+          <MetricCard label="Purchase orders" value={filtered.length} icon="cart-arrow-down" />
+          <MetricCard label="Ordered" value={ordered} tone={ordered ? "warning" : "default"} icon="clock-outline" />
+          <MetricCard label="Total value" value={formatMwk(totalValue)} tone="accent" icon="cash-multiple" />
+          <MetricCard label="Suppliers" value={suppliers.length} icon="truck-outline" />
+        </ScrollView>
         <Card style={styles.toolbar}>
-          <ExportMenu title={tab === "po" ? "purchase-orders" : tab === "grn" ? "goods-received" : "supplier-invoices"} rows={exportRows} />
-          {activeFetching ? <ActivityIndicator color={colors.accent} /> : null}
+          <Field value={query} onChangeText={setQuery} placeholder="Search purchase orders" style={styles.search} />
+          <View style={styles.toolbarActions}>
+            <ExportMenu title="purchase-orders" rows={exportRows} />
+            {isFetching ? <ActivityIndicator color={colors.accent} /> : null}
+          </View>
         </Card>
 
-        {tab === "po" ? (
-          <TableCard>
-            <TableHeader columns={["Ref", "Supplier", "Date", "Status", "Total", ""]} />
-            {activeLoading ? <LoadingRow label="Loading purchase orders..." /> : null}
-            {purchaseOrders.map((po) => (
-              <View key={po.id} style={styles.row}>
-                <Text style={styles.monoCell}>{String((po as unknown as Record<string, unknown>).ref_no ?? po.id.slice(0, 8).toUpperCase())}</Text>
-                <Text style={styles.cellText}>{po.supplierName ?? po.supplierId}</Text>
-                <Text style={styles.mutedText}>{new Date(String((po as unknown as Record<string, unknown>).order_date ?? po.date)).toLocaleDateString()}</Text>
-                <View style={styles.cell}><Badge tone={statusTone(po.status)}>{po.status}</Badge></View>
-                <Text style={styles.rightCell}>{formatMwk(po.total)}</Text>
-                <View style={styles.docButton}><MaterialCommunityIcons name="file-document-outline" size={16} color={colors.muted} /></View>
-              </View>
-            ))}
-          </TableCard>
-        ) : null}
-
-        {tab === "grn" ? (
-          activeLoading || grn.length ? (
-            <TableCard>
-              <TableHeader columns={["Ref", "PO", "Received", "Items", "By"]} />
-              {activeLoading ? <LoadingRow label="Loading GRNs..." /> : null}
-              {grn.map((note) => (
-                <View key={note.id} style={styles.row}>
-                  <Text style={styles.monoCell}>{note.refNo}</Text>
-                  <Text style={styles.mutedText}>{note.poId ?? "-"}</Text>
-                  <Text style={styles.mutedText}>{new Date(note.receivedAt).toLocaleString()}</Text>
-                  <Text style={styles.rightCell}>{note.totalItems}</Text>
-                  <Text style={styles.mutedText}>{note.receivedBy ?? "-"}</Text>
-                </View>
-              ))}
-            </TableCard>
-          ) : <EmptyPanel icon="package-variant-closed-check" title="No goods received yet" body="Create a PO and receive stock to populate this view." />
-        ) : null}
-
-        {tab === "inv" ? (
-          activeLoading || invoices.length ? (
-            <TableCard>
-              <TableHeader columns={["Invoice", "Supplier", "Due", "Status", "Total", "Paid"]} />
-              {activeLoading ? <LoadingRow label="Loading invoices..." /> : null}
-              {invoices.map((invoice) => (
-                <View key={invoice.id} style={styles.row}>
-                  <Text style={styles.monoCell}>{invoice.refNo}</Text>
-                  <Text style={styles.cellText}>{invoice.supplierName}</Text>
-                  <Text style={styles.mutedText}>{invoice.dueDate ? new Date(invoice.dueDate).toLocaleDateString() : "-"}</Text>
-                  <View style={styles.cell}><Badge tone={statusTone(invoice.status)}>{invoice.status}</Badge></View>
-                  <Text style={styles.rightCell}>{formatMwk(invoice.total)}</Text>
-                  <Text style={styles.rightCell}>{formatMwk(invoice.paid)}</Text>
-                </View>
-              ))}
-            </TableCard>
-          ) : <EmptyPanel icon="file-document-outline" title="No supplier invoices yet" body="Supplier invoices are created from received purchase documents." />
-        ) : null}
-
+        <TableCard>
+          <TableHeader columns={["Ref", "Supplier", "Date", "Status", "Items", "Total", ""]} />
+          {isLoading ? <LoadingRow label="Loading purchase orders..." /> : null}
+          {!isLoading && filtered.map((po) => (
+            <Pressable key={po.id} style={styles.row} onPress={() => setDetailId(po.id)}>
+              <Text style={styles.monoCell}>{cell((po as unknown as Record<string, unknown>).ref_no ?? po.id.slice(0, 8).toUpperCase())}</Text>
+              <Text style={styles.cellText}>{po.supplierName ?? po.supplierId}</Text>
+              <Text style={styles.mutedText}>{new Date(cell((po as unknown as Record<string, unknown>).order_date ?? po.date)).toLocaleDateString()}</Text>
+              <View style={styles.cell}><Badge tone={statusTone(po.status)}>{po.status}</Badge></View>
+              <Text style={styles.rightCell}>{cell((po as unknown as Record<string, unknown>).lineCount ?? "-")}</Text>
+              <Text style={styles.rightCell}>{formatMwk(po.total)}</Text>
+              <View style={styles.docButton}><MaterialCommunityIcons name="chevron-right" size={18} color={colors.muted} /></View>
+            </Pressable>
+          ))}
+          {!isLoading && !filtered.length ? <EmptyPanel icon="cart-arrow-down" title="No purchase orders" body="Create the first purchase order for a supplier." /> : null}
+        </TableCard>
       </ScrollView>
-      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
-        <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
-          <Pressable style={styles.panel}>
-            <Text style={styles.modalTitle}>New purchase order</Text>
-            <Picker label="Supplier" items={suppliers.map((supplier) => ({ id: supplier.id, name: supplier.name }))} value={supplierId} onChange={setSupplierId} />
-            <Picker label="Raw item" items={items.map((item) => ({ id: String(item.id), name: String(item.name) }))} value={itemId} onChange={setItemId} />
-            <View style={styles.grid}>
-              <Field style={styles.gridField} value={quantity} onChangeText={setQuantity} keyboardType="numeric" placeholder="Quantity" />
-              <Field style={styles.gridField} value={unitCost} onChangeText={setUnitCost} keyboardType="numeric" placeholder="Unit cost" />
-              <Field style={styles.gridField} value={landedCost} onChangeText={setLandedCost} keyboardType="numeric" placeholder="Transport/tax/duty" />
-            </View>
-            <Field value={note} onChangeText={setNote} placeholder="Note" />
-            {create.error ? <Text style={styles.error}>{create.error instanceof Error ? create.error.message : "Could not create PO"}</Text> : null}
-            <View style={styles.actions}>
-              <Button variant="outline" onPress={() => setOpen(false)}>Cancel</Button>
-              <Button onPress={() => create.mutate()} disabled={!supplierId || !itemId || !Number(quantity) || create.isPending}>Create PO</Button>
-            </View>
-          </Pressable>
-        </Pressable>
-      </Modal>
+      <PurchaseOrderModal
+        open={open}
+        step={step}
+        suppliers={suppliers.map((supplier) => ({ id: supplier.id, name: supplier.name, email: supplier.email ?? "", status: supplier.status ?? "active" }))}
+        supplierId={supplierId}
+        setSupplierId={setSupplierId}
+        lines={lines}
+        landedCost={landedCost}
+        note={note}
+        saving={create.isPending}
+        setLandedCost={setLandedCost}
+        setNote={setNote}
+        setStep={setStep}
+        updateLine={updateLine}
+        removeLine={removeLine}
+        addLine={() => setLines((current) => [...current, { ...emptyLine }])}
+        pickLineImage={pickLineImage}
+        onClose={() => { setOpen(false); resetForm(); }}
+        onContinue={validateAndContinue}
+        onSave={submit}
+      />
     </Screen>
   );
 }
 
-function Picker({ label, items, value, onChange }: { label: string; items: { id: string; name: string }[]; value: string; onChange: (id: string) => void }) {
+function PurchaseOrderModal({
+  open,
+  step,
+  suppliers,
+  supplierId,
+  setSupplierId,
+  lines,
+  landedCost,
+  note,
+  saving,
+  setLandedCost,
+  setNote,
+  setStep,
+  updateLine,
+  removeLine,
+  addLine,
+  pickLineImage,
+  onClose,
+  onContinue,
+  onSave
+}: {
+  open: boolean;
+  step: "supplier" | "items";
+  suppliers: { id: string; name: string; email: string; status: string }[];
+  supplierId: string;
+  setSupplierId: (value: string) => void;
+  lines: PoLine[];
+  landedCost: string;
+  note: string;
+  saving: boolean;
+  setLandedCost: (value: string) => void;
+  setNote: (value: string) => void;
+  setStep: (value: "supplier" | "items") => void;
+  updateLine: (index: number, patch: Partial<PoLine>) => void;
+  removeLine: (index: number) => void;
+  addLine: () => void;
+  pickLineImage: (index: number) => void;
+  onClose: () => void;
+  onContinue: () => void;
+  onSave: () => void;
+}) {
   return (
-    <View style={{ gap: 7 }}>
-      <Text style={styles.sectionLabel}>{label}</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionRail}>
-        {items.map((item) => {
-          const active = value === item.id;
-          return (
-            <Pressable key={item.id} style={[styles.optionChip, active && styles.optionChipActive]} onPress={() => onChange(item.id)}>
-              <Text style={[styles.optionText, active && styles.optionTextActive]}>{item.name}</Text>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
+    <Modal visible={open} transparent animationType="fade" presentationStyle="overFullScreen" onRequestClose={onClose}>
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.modalRoot}>
+        <Pressable style={styles.backdrop} onPress={onClose}>
+          <Pressable style={styles.panel} onPress={(event) => event.stopPropagation()}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.modalTitle}>New purchase order</Text>
+                <Text style={styles.modalSub}>{step === "supplier" ? "Step 1 of 2: choose supplier" : "Step 2 of 2: add order items"}</Text>
+              </View>
+              <Pressable style={styles.closeButton} onPress={onClose}>
+                <MaterialCommunityIcons name="close" size={20} color={colors.ink} />
+              </Pressable>
+            </View>
+            <ScrollView contentContainerStyle={styles.modalBody} keyboardShouldPersistTaps="handled">
+              {step === "supplier" ? (
+                <View style={styles.selectorList}>
+                  {suppliers.map((supplier) => {
+                    const active = supplier.id === supplierId;
+                    return (
+                      <Pressable key={supplier.id} style={[styles.supplierOption, active && styles.supplierOptionActive]} onPress={() => setSupplierId(supplier.id)}>
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={[styles.optionTitle, active && styles.optionTitleActive]}>{supplier.name}</Text>
+                          <Text style={[styles.optionMeta, active && styles.optionMetaActive]}>{supplier.email || "No email recorded"} - {supplier.status}</Text>
+                        </View>
+                        {active ? <MaterialCommunityIcons name="check-circle" size={20} color={colors.accent} /> : null}
+                      </Pressable>
+                    );
+                  })}
+                  {!suppliers.length ? <Text style={styles.emptyText}>Create a supplier first before making a purchase order.</Text> : null}
+                </View>
+              ) : (
+                <View style={styles.formStack}>
+                  {lines.map((line, index) => (
+                    <Card key={index} style={styles.lineCard}>
+                      <View style={styles.lineHeader}>
+                        <Text style={styles.lineTitle}>Item {index + 1}</Text>
+                        {lines.length > 1 ? <Pressable onPress={() => removeLine(index)}><MaterialCommunityIcons name="trash-can-outline" size={18} color={colors.danger} /></Pressable> : null}
+                      </View>
+                      <LabeledField label="Item name" required value={line.name} onChangeText={(name) => updateLine(index, { name })} placeholder="e.g. Glycerine" />
+                      <LabeledField label="Description" value={line.description} onChangeText={(description) => updateLine(index, { description })} placeholder="Grade, brand, packaging, or other details" multiline inputStyle={styles.textArea} />
+                      <View style={styles.grid}>
+                        <LabeledField label="Unit" value={line.unit} onChangeText={(unit) => updateLine(index, { unit })} placeholder="L, kg, ea" style={styles.gridField} />
+                        <LabeledField label="Quantity" required value={line.quantity} onChangeText={(quantity) => updateLine(index, { quantity })} keyboardType="numeric" style={styles.gridField} />
+                        <LabeledField label="Unit cost" value={line.unitCost} onChangeText={(unitCost) => updateLine(index, { unitCost })} keyboardType="numeric" style={styles.gridField} />
+                      </View>
+                      <Pressable style={styles.imageButton} onPress={() => pickLineImage(index)}>
+                        <MaterialCommunityIcons name={line.imageData ? "image-check-outline" : "image-plus-outline"} size={18} color={colors.ink} />
+                        <Text style={styles.imageButtonText}>{line.imageData ? "Picture attached" : "Attach picture if needed"}</Text>
+                      </Pressable>
+                    </Card>
+                  ))}
+                  <CommandButton icon="plus" label="Add another item" onPress={addLine} />
+                  <View style={styles.grid}>
+                    <LabeledField label="Transport / tax / duty / handling" value={landedCost} onChangeText={setLandedCost} keyboardType="numeric" style={styles.gridFieldWide} />
+                  </View>
+                  <LabeledField label="Order note" value={note} onChangeText={setNote} placeholder="Delivery instructions, terms, or special requirements" multiline inputStyle={styles.textArea} />
+                </View>
+              )}
+            </ScrollView>
+            <View style={styles.actions}>
+              {step === "items" ? <Button variant="outline" onPress={() => setStep("supplier")}>Back</Button> : <Button variant="outline" onPress={onClose}>Cancel</Button>}
+              {step === "supplier" ? <Button onPress={onContinue} disabled={!supplierId}>Next</Button> : <Button onPress={onSave} disabled={saving}>{saving ? "Saving..." : "Save purchase order"}</Button>}
+            </View>
+          </Pressable>
+        </Pressable>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+function LabeledField({ label, required, style, inputStyle, ...props }: ComponentProps<typeof Field> & { label: string; required?: boolean; inputStyle?: ComponentProps<typeof Field>["style"] }) {
+  return (
+    <View style={[styles.fieldWrap, style]}>
+      <Text style={styles.label}>{label}{required ? <Text style={styles.required}> *</Text> : null}</Text>
+      <Field {...props} style={inputStyle} />
     </View>
   );
+}
+
+function PurchaseOrderDetail({ id, data, loading, onBack }: { id: string; data: Record<string, unknown> | undefined; loading: boolean; onBack: () => void }) {
+  const email = useMutation({
+    mutationFn: () => api.emailPurchaseOrder(id),
+    onSuccess: (result) => Alert.alert("Purchase order email", result.message ?? "Email queued."),
+    onError: (error) => Alert.alert("Could not email purchase order", error instanceof Error ? error.message : "Download the PDF and send it manually.")
+  });
+  const items = Array.isArray(data?.items) ? data.items as Record<string, unknown>[] : [];
+  const title = cell(data?.refNo ?? data?.ref_no ?? "Purchase order");
+
+  async function sharePdf() {
+    if (!data) return;
+    const file = await Print.printToFileAsync({ html: purchaseOrderHtml(data, items) });
+    await Sharing.shareAsync(file.uri, { mimeType: "application/pdf", dialogTitle: `${title} PDF` });
+  }
+
+  return (
+    <Screen>
+      <ScrollView contentContainerStyle={styles.content}>
+        <View style={styles.detailHeader}>
+          <CommandButton icon="arrow-left" label="Purchases" onPress={onBack} />
+          <View style={styles.detailActions}>
+            <CommandButton icon="file-pdf-box" label="Download PDF" onPress={sharePdf} />
+            <CommandButton icon="email-outline" label={email.isPending ? "Sending..." : "Email supplier"} primary onPress={() => email.mutate()} />
+          </View>
+        </View>
+        {loading || !data ? <ActivityIndicator color={colors.accent} /> : (
+          <>
+            <Card style={styles.hero}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.heroTitle}>{title}</Text>
+                <Text style={styles.heroText}>{cell(data.supplierName)} {data.supplierEmail ? `- ${cell(data.supplierEmail)}` : ""}</Text>
+                <Text style={styles.heroText}>{cell(data.note || "No note")}</Text>
+              </View>
+              <Badge tone={statusTone(cell(data.status))}>{cell(data.status)}</Badge>
+            </Card>
+            <View style={styles.metrics}>
+              <MetricCard label="Items" value={items.length} icon="format-list-bulleted" />
+              <MetricCard label="Subtotal" value={formatMwk(Number(data.subtotal ?? 0))} icon="cash" />
+              <MetricCard label="Landed costs" value={formatMwk(Number(data.landedCost ?? data.landed_cost ?? 0))} icon="truck-delivery-outline" />
+              <MetricCard label="Total" value={formatMwk(Number(data.total ?? 0))} tone="accent" icon="cash-multiple" />
+            </View>
+            <TableCard>
+              <TableHeader columns={["Item", "Unit", "Qty", "Cost", "Total"]} />
+              {items.map((line) => (
+                <View key={cell(line.id)} style={styles.row}>
+                  <Text style={styles.cellText}>{cell(line.name)}</Text>
+                  <Text style={styles.mutedText}>{cell(line.unit)}</Text>
+                  <Text style={styles.rightCell}>{cell(line.quantity)}</Text>
+                  <Text style={styles.rightCell}>{formatMwk(Number(line.unitCost ?? 0))}</Text>
+                  <Text style={styles.rightCell}>{formatMwk(Number(line.lineTotal ?? 0))}</Text>
+                </View>
+              ))}
+            </TableCard>
+          </>
+        )}
+      </ScrollView>
+    </Screen>
+  );
+}
+
+function purchaseOrderHtml(data: Record<string, unknown>, items: Record<string, unknown>[]) {
+  const rows = items.map((line) => `<tr><td>${cell(line.name)}</td><td>${cell(line.unit)}</td><td>${cell(line.quantity)}</td><td>${formatMwk(Number(line.unitCost ?? 0))}</td><td>${formatMwk(Number(line.lineTotal ?? 0))}</td></tr>`).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:#221e1a}table{width:100%;border-collapse:collapse;margin-top:20px}td,th{border:1px solid #ddd;padding:8px;font-size:12px}th{background:#f4f1eb;text-align:left}.total{text-align:right;font-weight:700}.muted{color:#766d63}</style></head><body><h1>Purchase Order ${cell(data.refNo ?? data.ref_no)}</h1><p class="muted">Supplier: ${cell(data.supplierName)} ${data.supplierEmail ? `(${cell(data.supplierEmail)})` : ""}</p><p class="muted">Date: ${cell(data.date ?? data.order_date)}</p><table><thead><tr><th>Item</th><th>Unit</th><th>Qty</th><th>Unit cost</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table><p class="total">Subtotal: ${formatMwk(Number(data.subtotal ?? 0))}</p><p class="total">Landed costs: ${formatMwk(Number(data.landedCost ?? data.landed_cost ?? 0))}</p><p class="total">Total: ${formatMwk(Number(data.total ?? 0))}</p><p>${cell(data.note ?? "")}</p></body></html>`;
 }
 
 function LoadingRow({ label }: { label: string }) {
@@ -197,7 +397,10 @@ function LoadingRow({ label }: { label: string }) {
 const styles = StyleSheet.create({
   content: { gap: 14, padding: 18, width: "100%", maxWidth: 1240, alignSelf: "center" },
   metrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  toolbar: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", padding: 10 },
+  metricsLine: { gap: 10, paddingRight: 18 },
+  toolbar: { gap: 8, padding: 10 },
+  toolbarActions: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  search: { width: "100%" },
   row: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 11 },
   cell: { width: 100, minWidth: 100 },
   cellText: { width: 170, minWidth: 170, color: colors.ink, fontWeight: "800" },
@@ -206,18 +409,40 @@ const styles = StyleSheet.create({
   rightCell: { width: 110, minWidth: 110, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
   docButton: { width: 42, minWidth: 42, height: 34, alignItems: "center", justifyContent: "center", borderRadius: 6 },
   loadingRow: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14 },
-  loadingText: { color: colors.muted, fontWeight: "700" }
-  ,backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },
-  panel: { width: "100%", maxWidth: 560, gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },
+  loadingText: { color: colors.muted, fontWeight: "700" },
+  modalRoot: { flex: 1 },
+  backdrop: { flex: 1, backgroundColor: "rgba(26,22,17,0.42)", alignItems: "center", justifyContent: "center", padding: 14 },
+  panel: { width: "100%", maxWidth: 680, maxHeight: "92%", borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, overflow: "hidden" },
+  modalHeader: { flexDirection: "row", alignItems: "flex-start", gap: 10, borderBottomWidth: 1, borderBottomColor: colors.line, padding: 14 },
   modalTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 23, fontWeight: "700" },
-  sectionLabel: { color: colors.muted, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
-  optionRail: { gap: 8 },
-  optionChip: { minHeight: 34, justifyContent: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 7, backgroundColor: colors.surface, paddingHorizontal: 11 },
-  optionChipActive: { backgroundColor: colors.sidebar, borderColor: colors.sidebar },
-  optionText: { color: colors.muted, fontSize: 12, fontWeight: "900" },
-  optionTextActive: { color: colors.sidebarText },
+  modalSub: { color: colors.muted, marginTop: 3 },
+  closeButton: { width: 38, height: 38, alignItems: "center", justifyContent: "center", borderRadius: 7, borderWidth: 1, borderColor: colors.line },
+  modalBody: { gap: 12, padding: 14 },
+  selectorList: { gap: 8 },
+  supplierOption: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: 10, borderWidth: 1, borderColor: colors.line, borderRadius: 8, padding: 12 },
+  supplierOptionActive: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
+  optionTitle: { color: colors.ink, fontWeight: "900" },
+  optionTitleActive: { color: colors.accentDark },
+  optionMeta: { color: colors.muted, fontSize: 12, marginTop: 3 },
+  optionMetaActive: { color: colors.accentDark },
+  emptyText: { color: colors.muted, textAlign: "center", padding: 18 },
+  formStack: { gap: 12 },
+  lineCard: { gap: 10, padding: 12 },
+  lineHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  lineTitle: { color: colors.ink, fontWeight: "900" },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  gridField: { flex: 1, minWidth: 150 },
-  error: { color: colors.danger, fontWeight: "800" },
-  actions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 }
+  gridField: { flexGrow: 1, flexBasis: 130 },
+  gridFieldWide: { flexGrow: 1, flexBasis: 260 },
+  fieldWrap: { gap: 5 },
+  label: { color: colors.muted, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
+  required: { color: colors.danger },
+  textArea: { minHeight: 82, paddingTop: 10, textAlignVertical: "top" },
+  imageButton: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, borderColor: colors.line, borderRadius: 7, paddingHorizontal: 10 },
+  imageButtonText: { color: colors.ink, fontWeight: "800" },
+  actions: { flexDirection: "row", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", borderTopWidth: 1, borderTopColor: colors.line, padding: 14 },
+  detailHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" },
+  detailActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  hero: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
+  heroTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 30, fontWeight: "700" },
+  heroText: { color: colors.muted, marginTop: 4 }
 });

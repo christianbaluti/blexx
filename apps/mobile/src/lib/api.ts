@@ -409,6 +409,12 @@ export const api = {
   createPurchaseOrder(payload: Record<string, unknown>) {
     return request<{ id: string; refNo: string }>("/purchase-orders", { method: "POST", body: JSON.stringify(payload) });
   },
+  purchaseOrderDetail(id: string) {
+    return request<Record<string, unknown>>(`/purchase-orders/${id}`);
+  },
+  emailPurchaseOrder(id: string) {
+    return request<{ ok: boolean; message?: string }>(`/purchase-orders/${id}/email`, { method: "POST" });
+  },
   createGrn(payload: Record<string, unknown>) {
     return request<{ id: string; refNo: string }>("/grns", { method: "POST", body: JSON.stringify(payload) });
   },
