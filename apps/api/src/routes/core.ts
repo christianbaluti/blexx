@@ -1,5 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import bcrypt from "bcryptjs";
+import nodemailer from "nodemailer";
+import PDFDocument from "pdfkit";
 import { z } from "zod";
 import { numberify, pool } from "../db.js";
 import { config } from "../config.js";
@@ -18,6 +20,68 @@ function ref(prefix: string) {
 
 function money(value: unknown) {
   return Number(Number(value ?? 0).toFixed(2));
+}
+
+function renderTemplate(template: string, values: Record<string, string>) {
+  return Object.entries(values).reduce((text, [key, value]) => text.replaceAll(`{{${key}}}`, value), template);
+}
+
+function formatMoney(value: unknown) {
+  return `MWK ${money(value).toLocaleString("en-MW", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function createPurchaseOrderPdf(order: Record<string, unknown>, items: Record<string, unknown>[]) {
+  return new Promise<Buffer>((resolve, reject) => {
+    const doc = new PDFDocument({ size: "A4", margin: 48 });
+    const chunks: Buffer[] = [];
+    doc.on("data", (chunk: Buffer) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    doc.fontSize(22).text(`Purchase Order ${String(order.refNo ?? order.ref_no ?? "")}`, { continued: false });
+    doc.moveDown(0.5);
+    doc.fontSize(10).fillColor("#555").text(`Supplier: ${String(order.supplierName ?? "")}`);
+    if (order.supplierEmail) doc.text(`Email: ${String(order.supplierEmail)}`);
+    doc.text(`Date: ${String(order.date ?? order.order_date ?? "")}`);
+    doc.moveDown();
+
+    doc.fillColor("#111").fontSize(11).text("Item", 48, doc.y, { width: 210, continued: true });
+    doc.text("Unit", { width: 70, continued: true });
+    doc.text("Qty", { width: 70, align: "right", continued: true });
+    doc.text("Unit cost", { width: 90, align: "right", continued: true });
+    doc.text("Total", { width: 90, align: "right" });
+    doc.moveTo(48, doc.y + 4).lineTo(548, doc.y + 4).strokeColor("#ddd").stroke();
+    doc.moveDown(0.7);
+
+    for (const item of items) {
+      const y = doc.y;
+      doc.fillColor("#111").fontSize(10).text(String(item.name ?? ""), 48, y, { width: 210 });
+      doc.text(String(item.unit ?? ""), 258, y, { width: 70 });
+      doc.text(String(item.quantity ?? ""), 328, y, { width: 70, align: "right" });
+      doc.text(formatMoney(item.unitCost), 398, y, { width: 90, align: "right" });
+      doc.text(formatMoney(item.lineTotal), 488, y, { width: 60, align: "right" });
+      doc.moveDown(0.8);
+    }
+
+    doc.moveDown();
+    doc.fontSize(11).text(`Subtotal: ${formatMoney(order.subtotal)}`, { align: "right" });
+    doc.text(`Landed costs: ${formatMoney(order.landedCost ?? order.landed_cost)}`, { align: "right" });
+    doc.fontSize(13).text(`Total: ${formatMoney(order.total)}`, { align: "right" });
+    if (order.note) {
+      doc.moveDown();
+      doc.fontSize(10).fillColor("#555").text(String(order.note));
+    }
+    doc.end();
+  });
+}
+
+function mailTransport() {
+  return nodemailer.createTransport({
+    host: config.smtpHost,
+    port: config.smtpPort,
+    secure: config.smtpSecure,
+    auth: config.smtpUser && config.smtpPass ? { user: config.smtpUser, pass: config.smtpPass } : undefined
+  });
 }
 
 async function defaultLocation(type: "warehouse" | "shop", client: DbClient = pool) {
@@ -518,15 +582,54 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.post("/purchase-orders/:id/email", async (request) => {
     const { id } = idParam.parse(request.params);
-    const result = await pool.query(
-      `select po.ref_no, s.email, s.name from purchase_orders po join suppliers s on s.id = po.supplier_id where po.id = $1`,
-      [id]
-    );
-    const row = result.rows[0];
+    const [orderResult, linesResult, settingsResult] = await Promise.all([
+      pool.query(
+        `select po.*, po.ref_no as "refNo", po.order_date as "date", s.email as "supplierEmail", s.name as "supplierName"
+         from purchase_orders po join suppliers s on s.id = po.supplier_id where po.id = $1`,
+        [id]
+      ),
+      pool.query(
+        `select poi.id, poi.quantity, poi.unit_cost as "unitCost", poi.line_total as "lineTotal", i.name, i.unit
+         from purchase_order_items poi join items i on i.id = poi.item_id
+         where poi.purchase_order_id = $1 order by poi.id`,
+        [id]
+      ),
+      pool.query("select value from app_settings where key = 'settings'")
+    ]);
+    const row = orderResult.rows[0];
     if (!row) throw app.httpErrors.notFound("Purchase order not found");
-    if (!row.email) throw app.httpErrors.badRequest("Supplier does not have an email address.");
-    if (!config.smtpHost) throw app.httpErrors.serviceUnavailable("SMTP is not configured. Download the PDF and send it manually, or set SMTP_HOST and SMTP_FROM on the backend.");
-    return { ok: true, message: "Purchase order email queued." };
+    if (!row.supplierEmail) throw app.httpErrors.badRequest("Supplier does not have an email address.");
+    if (!config.smtpHost || !config.smtpUser || !config.smtpPass) throw app.httpErrors.serviceUnavailable("SMTP is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM and SMTP_SECURE on the backend.");
+
+    const settings = settingsResult.rows[0]?.value as { company?: { tradingName?: string }; emailTemplates?: { purchaseOrderSubject?: string; purchaseOrderBody?: string } } | undefined;
+    const values = {
+      refNo: String(row.refNo ?? row.ref_no),
+      supplierName: String(row.supplierName ?? ""),
+      companyName: settings?.company?.tradingName ?? "POS & Inventory +"
+    };
+    const subject = renderTemplate(settings?.emailTemplates?.purchaseOrderSubject ?? "Purchase order {{refNo}} from {{companyName}}", values);
+    const text = renderTemplate(settings?.emailTemplates?.purchaseOrderBody ?? "Dear {{supplierName}},\n\nPlease find attached purchase order {{refNo}}.\n\nRegards,\n{{companyName}}", values);
+    const pdf = await createPurchaseOrderPdf(row, linesResult.rows);
+    await mailTransport().sendMail({
+      from: config.smtpFrom,
+      to: String(row.supplierEmail),
+      subject,
+      text,
+      attachments: [{ filename: `${values.refNo}.pdf`, content: pdf, contentType: "application/pdf" }]
+    });
+    return { ok: true, message: "Purchase order email sent." };
+  });
+
+  app.post("/smtp/test", async (request) => {
+    if (!config.smtpHost || !config.smtpUser || !config.smtpPass) throw app.httpErrors.serviceUnavailable("SMTP is not configured.");
+    const body = z.object({ to: z.string().email().optional() }).parse(request.body ?? {});
+    await mailTransport().sendMail({
+      from: config.smtpFrom,
+      to: body.to ?? config.smtpFrom,
+      subject: "POS & Inventory + SMTP test",
+      text: "SMTP is configured and working."
+    });
+    return { ok: true };
   });
 
   app.post("/grns", async (request, reply) => {

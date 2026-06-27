@@ -1,5 +1,6 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
@@ -106,16 +107,31 @@ export default function Purchases() {
       Alert.alert("Permission needed", "Photo library permission is required to attach an item picture.");
       return;
     }
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.35, base64: true });
-    if (result.canceled) return;
-    const asset = result.assets[0];
-    if (!asset?.base64) return;
-    const dataUrl = `data:${asset.mimeType ?? "image/jpeg"};base64,${asset.base64}`;
-    if (dataUrl.length > 140_000) {
-      Alert.alert("Image too large", "Choose a smaller image. Product/order images must stay under about 100 KB.");
-      return;
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.5, base64: false });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      if (!asset?.uri) return;
+      let quality = 0.45;
+      let dataUrl = "";
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const converted = await ImageManipulator.manipulateAsync(
+          asset.uri,
+          [{ resize: { width: 900 } }],
+          { compress: quality, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+        );
+        dataUrl = `data:image/jpeg;base64,${converted.base64 ?? ""}`;
+        if (dataUrl.length <= 140_000) break;
+        quality = Math.max(0.18, quality - 0.1);
+      }
+      if (!dataUrl || dataUrl.length > 140_000) {
+        Alert.alert("Image too large", "Choose a smaller image. Order item images must stay under about 100 KB after optimization.");
+        return;
+      }
+      updateLine(index, { imageData: dataUrl });
+    } catch {
+      Alert.alert("Could not attach image", "This image could not be converted. Try a JPG or PNG screenshot/photo.");
     }
-    updateLine(index, { imageData: dataUrl });
   }
 
   function validateAndContinue() {
@@ -336,8 +352,17 @@ function PurchaseOrderDetail({ id, data, loading, onBack }: { id: string; data: 
 
   async function sharePdf() {
     if (!data) return;
-    const file = await Print.printToFileAsync({ html: purchaseOrderHtml(data, items) });
-    await Sharing.shareAsync(file.uri, { mimeType: "application/pdf", dialogTitle: `${title} PDF` });
+    try {
+      const file = await Print.printToFileAsync({ html: purchaseOrderHtml(data, items) });
+      const canShare = await Sharing.isAvailableAsync();
+      if (!canShare) {
+        await Print.printAsync({ uri: file.uri });
+        return;
+      }
+      await Sharing.shareAsync(file.uri, { mimeType: "application/pdf", UTI: "com.adobe.pdf", dialogTitle: `${title} PDF` });
+    } catch (error) {
+      Alert.alert("Could not create PDF", error instanceof Error ? error.message : "Please try again.");
+    }
   }
 
   return (

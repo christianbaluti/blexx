@@ -1,5 +1,6 @@
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
+import { Alert } from "react-native";
 import type { SaleLineInput } from "@blex/shared";
 import { formatMwk } from "@blex/shared";
 
@@ -19,9 +20,16 @@ export async function shareReceipt(input: { refNo: string; total: number; lines:
       </body>
     </html>
   `;
-  const file = await Print.printToFileAsync({ html });
-  if (await Sharing.isAvailableAsync()) {
-    await Sharing.shareAsync(file.uri);
+  try {
+    const file = await Print.printToFileAsync({ html });
+    if (await Sharing.isAvailableAsync()) {
+      await Sharing.shareAsync(file.uri, { mimeType: "application/pdf", UTI: "com.adobe.pdf", dialogTitle: `Receipt ${input.refNo}` });
+    } else {
+      await Print.printAsync({ uri: file.uri });
+    }
+    return file.uri;
+  } catch (error) {
+    Alert.alert("Could not share receipt", error instanceof Error ? error.message : "Please try again.");
+    throw error;
   }
-  return file.uri;
 }

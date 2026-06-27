@@ -12,6 +12,10 @@ export const config = {
   jwtSecret: env("JWT_SECRET", "dev-secret-change-me"),
   port: Number(env("API_PORT", "4000")),
   smtpHost: env("SMTP_HOST", ""),
+  smtpPort: Number(env("SMTP_PORT", "465")),
+  smtpUser: env("SMTP_USER", ""),
+  smtpPass: env("SMTP_PASS", ""),
+  smtpSecure: env("SMTP_SECURE", "true") === "true",
   smtpFrom: env("SMTP_FROM", "no-reply@pos-inventory-plus.local"),
   appDownloadAndroidUrl: env("APP_DOWNLOAD_ANDROID_URL", "https://expo.dev/accounts/christianbaluti/projects/pos-inventory-plus"),
   appDownloadIosUrl: env("APP_DOWNLOAD_IOS_URL", "Ask your administrator for the TestFlight invite")

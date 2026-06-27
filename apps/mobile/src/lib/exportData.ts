@@ -27,25 +27,33 @@ function rowsToHtml(title: string, rows: Record<string, unknown>[]) {
 
 export async function exportRows(title: string, rows: Record<string, unknown>[], format: ExportFormat) {
   const safeTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "export";
-  const canShare = await Sharing.isAvailableAsync();
-  if (!canShare) {
-    Alert.alert("Sharing unavailable", "This device cannot open the share sheet right now.");
-    return;
-  }
   if (!rows.length) {
     Alert.alert("Nothing to export", "There are no rows in the current table.");
     return;
   }
-  if (format === "pdf") {
-    const file = await Print.printToFileAsync({ html: rowsToHtml(title, rows) });
-    await Sharing.shareAsync(file.uri, { mimeType: "application/pdf", dialogTitle: `${title} PDF` });
-    return;
-  }
+  try {
+    const canShare = await Sharing.isAvailableAsync();
+    if (format === "pdf") {
+      const file = await Print.printToFileAsync({ html: rowsToHtml(title, rows) });
+      if (!canShare) {
+        await Print.printAsync({ uri: file.uri });
+        return;
+      }
+      await Sharing.shareAsync(file.uri, { mimeType: "application/pdf", UTI: "com.adobe.pdf", dialogTitle: `${title} PDF` });
+      return;
+    }
 
-  const body = format === "xlsx" ? rowsToHtml(title, rows) : rowsToCsv(rows);
-  const extension = format === "xlsx" ? "xls" : "csv";
-  const mimeType = format === "xlsx" ? "application/vnd.ms-excel" : "text/csv";
-  const uri = `${FileSystem.cacheDirectory}${safeTitle}-${Date.now()}.${extension}`;
-  await FileSystem.writeAsStringAsync(uri, body);
-  await Sharing.shareAsync(uri, { mimeType, dialogTitle: `${title} ${extension.toUpperCase()}` });
+    if (!canShare) {
+      Alert.alert("Sharing unavailable", "This device cannot open the share sheet right now.");
+      return;
+    }
+    const body = format === "xlsx" ? rowsToHtml(title, rows) : rowsToCsv(rows);
+    const extension = format === "xlsx" ? "xls" : "csv";
+    const mimeType = format === "xlsx" ? "application/vnd.ms-excel" : "text/csv";
+    const uri = `${FileSystem.cacheDirectory}${safeTitle}-${Date.now()}.${extension}`;
+    await FileSystem.writeAsStringAsync(uri, body);
+    await Sharing.shareAsync(uri, { mimeType, dialogTitle: `${title} ${extension.toUpperCase()}` });
+  } catch (error) {
+    Alert.alert("Export failed", error instanceof Error ? error.message : "Please try again.");
+  }
 }
