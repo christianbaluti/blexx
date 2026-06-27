@@ -80,7 +80,9 @@ export function getApiUrl() {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const apiUrl = getApiUrl();
   const headers = new Headers(options.headers);
-  headers.set("content-type", "application/json");
+  if (options.body != null && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
   const token = await getAuthToken();
   if (token && path !== "/auth/login") headers.set("authorization", `Bearer ${token}`);
 
