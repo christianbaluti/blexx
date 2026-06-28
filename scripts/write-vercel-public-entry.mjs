@@ -1,11 +1,16 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+const apiDist = join(process.cwd(), "api", "dist");
+await rm(apiDist, { recursive: true, force: true });
+await mkdir(apiDist, { recursive: true });
+await cp(join(process.cwd(), "apps", "api", "dist"), apiDist, { recursive: true });
 
 const entries = [
   {
     dir: join(process.cwd(), "api"),
     filename: "index.mjs",
-    contents: `import { handleVercelRequest } from "../apps/api/dist/vercel.js";\n\nexport default handleVercelRequest;\n`
+    contents: `import { handleVercelRequest } from "./dist/vercel.js";\n\nexport default handleVercelRequest;\n`
   },
   {
     dir: join(process.cwd(), "api"),
