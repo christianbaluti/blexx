@@ -13,6 +13,7 @@ type DbClient = {
 const idParam = z.object({ id: z.string().uuid() });
 const nullableText = z.string().trim().nullable().optional();
 const dataUrl = z.string().max(140_000).regex(/^data:[\w/+.-]+;base64,[A-Za-z0-9+/=]+$/).nullable().optional();
+const attachmentDataUrl = z.string().max(3_000_000).regex(/^data:[\w/+.-]+;base64,[A-Za-z0-9+/=]+$/).nullable().optional();
 
 function ref(prefix: string) {
   return `${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -267,6 +268,9 @@ const grnSchema = z.object({
   note: nullableText,
   createInvoice: z.boolean().default(false),
   invoiceDueDate: nullableText,
+  invoiceAttachmentName: nullableText,
+  invoiceAttachmentMime: nullableText,
+  invoiceAttachmentData: attachmentDataUrl,
   invoiceExtraCosts: z.array(z.object({
     description: z.string().trim().min(1),
     amount: z.number().nonnegative()
@@ -289,9 +293,10 @@ const invoiceSchema = z.object({
   invoiceDate: z.string().optional(),
   dueDate: nullableText,
   total: z.number().nonnegative(),
+  paid: z.number().nonnegative().optional(),
   attachmentName: nullableText,
   attachmentMime: nullableText,
-  attachmentData: dataUrl,
+  attachmentData: attachmentDataUrl,
   note: nullableText
 });
 
@@ -833,9 +838,9 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       }
       if (body.createInvoice) {
         const invoice = await client.query(
-          `insert into supplier_invoices (ref_no, supplier_id, purchase_order_id, grn_id, due_date, total, note)
-           values ($1,$2,$3,$4,$5,$6,'from grn') returning id`,
-          [ref("SI"), body.supplierId, body.purchaseOrderId ?? null, grnId, body.invoiceDueDate ?? null, invoiceTotal]
+          `insert into supplier_invoices (ref_no, supplier_id, purchase_order_id, grn_id, due_date, total, attachment_name, attachment_mime, attachment_data, note)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'from grn') returning id`,
+          [ref("SI"), body.supplierId, body.purchaseOrderId ?? null, grnId, body.invoiceDueDate ?? null, invoiceTotal, body.invoiceAttachmentName ?? null, body.invoiceAttachmentMime ?? null, body.invoiceAttachmentData ?? null]
         );
         await client.query("insert into expenses (supplier_invoice_id, category, description, amount) values ($1,'supplier_invoice','Supplier invoice from GRN goods',$2)", [invoice.rows[0].id, goodsTotal]);
         for (const cost of body.invoiceExtraCosts) {
@@ -873,7 +878,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.get("/grns/:id", async (request) => {
     const { id } = idParam.parse(request.params);
-    const [grn, items] = await Promise.all([
+    const [grn, items, invoices] = await Promise.all([
       pool.query(
         `select g.*, g.ref_no as "refNo", po.ref_no as "poRefNo", s.name as supplier_name, s.name as "supplierName", l.name as "locationName", l.type as "locationType"
          from grns g
@@ -893,17 +898,25 @@ export async function registerCoreRoutes(app: FastifyInstance) {
          order by gi.id`,
         [id]
       )
+      ,
+      pool.query(
+        `select id, ref_no as "refNo", due_date as "dueDate", total, paid, status, attachment_name as "attachmentName", attachment_mime as "attachmentMime", attachment_data as "attachmentData"
+         from supplier_invoices where grn_id = $1 order by created_at desc`,
+        [id]
+      )
     ]);
     if (!grn.rows[0]) throw app.httpErrors.notFound("GRN not found");
-    return { ...grn.rows[0], items: items.rows };
+    return { ...grn.rows[0], items: items.rows, invoices: invoices.rows.map((row) => ({ ...row, total: money(row.total), paid: money(row.paid) })) };
   });
 
   app.post("/supplier-invoices", async (request, reply) => {
     const body = invoiceSchema.parse(request.body);
+    const paid = body.paid ?? 0;
+    const status = paid >= body.total && body.total > 0 ? "paid" : paid > 0 ? "partial" : "open";
     const result = await pool.query(
-      `insert into supplier_invoices (ref_no, supplier_id, purchase_order_id, grn_id, invoice_date, due_date, total, attachment_name, attachment_mime, attachment_data, note)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning id, ref_no`,
-      [ref("SI"), body.supplierId, body.purchaseOrderId ?? null, body.grnId ?? null, body.invoiceDate ?? new Date().toISOString().slice(0, 10), body.dueDate ?? null, body.total, body.attachmentName ?? null, body.attachmentMime ?? null, body.attachmentData ?? null, body.note ?? null]
+      `insert into supplier_invoices (ref_no, supplier_id, purchase_order_id, grn_id, invoice_date, due_date, total, paid, status, attachment_name, attachment_mime, attachment_data, note)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning id, ref_no`,
+      [ref("SI"), body.supplierId, body.purchaseOrderId ?? null, body.grnId ?? null, body.invoiceDate ?? new Date().toISOString().slice(0, 10), body.dueDate ?? null, body.total, paid, status, body.attachmentName ?? null, body.attachmentMime ?? null, body.attachmentData ?? null, body.note ?? null]
     );
     await pool.query("insert into expenses (supplier_invoice_id, category, description, amount) values ($1,'supplier_invoice','Supplier invoice',$2)", [result.rows[0].id, body.total]);
     await pool.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_invoice','supplier_invoice',$1,$2,'Supplier invoice')", [result.rows[0].id, body.total]);
@@ -937,11 +950,23 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     const body = z.object({
       dueDate: nullableText,
       total: z.number().nonnegative().optional(),
+      paid: z.number().nonnegative().optional(),
+      attachmentName: nullableText,
+      attachmentMime: nullableText,
+      attachmentData: attachmentDataUrl,
       status: z.enum(["open", "partial", "paid", "void"]).optional()
     }).parse(request.body);
+    const current = await pool.query("select total, paid from supplier_invoices where id = $1", [id]);
+    if (!current.rows[0]) throw app.httpErrors.notFound("Invoice not found");
+    const nextTotal = body.total ?? numberify(current.rows[0].total);
+    const nextPaid = body.paid ?? numberify(current.rows[0].paid);
+    const nextStatus = body.status ?? (nextPaid >= nextTotal && nextTotal > 0 ? "paid" : nextPaid > 0 ? "partial" : "open");
     await pool.query(
-      "update supplier_invoices set due_date = coalesce($2, due_date), total = coalesce($3, total), status = coalesce($4::document_status, status) where id = $1",
-      [id, body.dueDate ?? null, body.total ?? null, body.status ?? null]
+      `update supplier_invoices
+       set due_date = coalesce($2, due_date), total = $3, paid = $4, status = $5::document_status,
+           attachment_name = coalesce($6, attachment_name), attachment_mime = coalesce($7, attachment_mime), attachment_data = coalesce($8, attachment_data)
+       where id = $1`,
+      [id, body.dueDate ?? null, nextTotal, nextPaid, nextStatus, body.attachmentName ?? null, body.attachmentMime ?? null, body.attachmentData ?? null]
     );
     return { ok: true };
   });

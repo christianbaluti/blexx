@@ -6,7 +6,10 @@ import { formatMwk } from "@blex/shared";
 import { Badge, CommandButton, EmptyPanel, MetricCard, PageHeader, TableCard, TableHeader } from "../../src/components/feature-ui";
 import { ExportMenu } from "../../src/components/export-menu";
 import { Button, Card, Field, Screen } from "../../src/components/ui";
+import { AttachmentPicker } from "../../src/components/attachment-picker";
+import { DatePickerField } from "../../src/components/date-picker-field";
 import { api } from "../../src/lib/api";
+import { openDataAttachment } from "../../src/lib/attachments";
 import { colors, typography } from "../../src/lib/theme";
 
 type ReceiveMode = "po" | "direct";
@@ -33,18 +36,15 @@ type GrnForm = {
   note: string;
   createInvoice: boolean;
   invoiceDueDate: string;
+  invoiceAttachmentName: string;
+  invoiceAttachmentMime: string;
+  invoiceAttachmentData: string;
   extraCosts: ExtraCost[];
   lines: GrnLine[];
 };
 
 const emptyLine: GrnLine = { itemId: "", itemName: "", unit: "each", quantity: "1", unitCost: "0", expiryDate: "" };
-const emptyForm: GrnForm = { supplierId: "", locationId: "", receiveMode: "po", purchaseOrderId: "", note: "", createInvoice: false, invoiceDueDate: "", extraCosts: [], lines: [{ ...emptyLine }] };
-
-function today(offsetDays = 0) {
-  const date = new Date();
-  date.setDate(date.getDate() + offsetDays);
-  return date.toISOString().slice(0, 10);
-}
+const emptyForm: GrnForm = { supplierId: "", locationId: "", receiveMode: "po", purchaseOrderId: "", note: "", createInvoice: false, invoiceDueDate: "", invoiceAttachmentName: "", invoiceAttachmentMime: "", invoiceAttachmentData: "", extraCosts: [], lines: [{ ...emptyLine }] };
 
 function numberValue(value: string) {
   return Number(value || 0);
@@ -117,6 +117,9 @@ export default function Grn() {
       note: form.note || null,
       createInvoice: form.createInvoice,
       invoiceDueDate: form.invoiceDueDate || null,
+      invoiceAttachmentName: form.invoiceAttachmentName || null,
+      invoiceAttachmentMime: form.invoiceAttachmentMime || null,
+      invoiceAttachmentData: form.invoiceAttachmentData || null,
       invoiceExtraCosts: form.extraCosts.filter((cost) => cost.description.trim() && numberValue(cost.amount) > 0).map((cost) => ({ description: cost.description.trim(), amount: numberValue(cost.amount) })),
       items: form.lines.map((line) => ({
         purchaseOrderItemId: form.receiveMode === "po" ? line.purchaseOrderItemId ?? null : null,
@@ -322,7 +325,7 @@ function GrnModal({ open, form, setForm, suppliers, locations, items, purchaseOr
                     <LabeledField label="Quantity received" value={line.quantity} onChangeText={(quantity) => updateLine(index, { quantity })} keyboardType="numeric" style={styles.gridField} />
                     <LabeledField label="Buying price per unit" value={line.unitCost} onChangeText={(unitCost) => updateLine(index, { unitCost })} keyboardType="numeric" style={styles.gridField} />
                   </View>
-                  <DateChooser label="Expiry date" value={line.expiryDate} onChange={(expiryDate) => updateLine(index, { expiryDate })} />
+                  <DatePickerField label="Expiry date" value={line.expiryDate} onChange={(expiryDate) => updateLine(index, { expiryDate })} />
                 </Card>
               ))}
 
@@ -332,7 +335,11 @@ function GrnModal({ open, form, setForm, suppliers, locations, items, purchaseOr
               </Pressable>
               {form.createInvoice ? (
                 <Card style={styles.invoiceBox}>
-                  <DateChooser label="Invoice due date" value={form.invoiceDueDate} onChange={(invoiceDueDate) => setForm({ ...form, invoiceDueDate })} />
+                  <DatePickerField label="Invoice due date" value={form.invoiceDueDate} onChange={(invoiceDueDate) => setForm({ ...form, invoiceDueDate })} />
+                  <AttachmentPicker
+                    value={{ attachmentName: form.invoiceAttachmentName, attachmentMime: form.invoiceAttachmentMime, attachmentData: form.invoiceAttachmentData }}
+                    onChange={(attachment) => setForm({ ...form, invoiceAttachmentName: attachment.attachmentName, invoiceAttachmentMime: attachment.attachmentMime, invoiceAttachmentData: attachment.attachmentData })}
+                  />
                   <View style={styles.sectionHead}>
                     <Text style={styles.sectionTitle}>Related costs</Text>
                     <CommandButton icon="plus" label="Add cost" onPress={() => setForm({ ...form, extraCosts: [...form.extraCosts, { description: "", amount: "0" }] })} />
@@ -366,6 +373,7 @@ function GrnModal({ open, form, setForm, suppliers, locations, items, purchaseOr
 
 function GrnDetail({ data, loading, onBack }: { data: Record<string, unknown> | undefined; loading: boolean; onBack: () => void }) {
   const lines = Array.isArray(data?.items) ? data.items as Record<string, unknown>[] : [];
+  const invoices = Array.isArray(data?.invoices) ? data.invoices as Record<string, unknown>[] : [];
   const exportRows = lines.map((line) => ({
     item: line.itemName ?? line.item_name,
     batchNo: line.batchNo ?? line.batch_no ?? "",
@@ -398,7 +406,26 @@ function GrnDetail({ data, loading, onBack }: { data: Record<string, unknown> | 
             <View style={styles.metrics}>
               <MetricCard label="Lines" value={lines.length} icon="format-list-bulleted" />
               <MetricCard label="Total value" value={formatMwk(Number(data.total ?? 0))} tone="accent" icon="cash" />
+              <MetricCard label="Invoices" value={invoices.length} icon="file-document-outline" />
             </View>
+            {invoices.length ? (
+              <Card style={styles.invoiceBox}>
+                <Text style={styles.sectionTitle}>Linked supplier invoice</Text>
+                {invoices.map((invoice) => (
+                  <View key={String(invoice.id)} style={styles.invoiceLine}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.poLineName}>{String(invoice.refNo ?? "-")}</Text>
+                      <Text style={styles.poLineMeta}>Due {String(invoice.dueDate ?? "-")} | {formatMwk(Number(invoice.total ?? 0))}</Text>
+                      <Text style={styles.poLineMeta}>Attachment: {String(invoice.attachmentName ?? "No file attached")}</Text>
+                    </View>
+                    <View style={styles.invoiceActions}>
+                      <Badge tone={String(invoice.status) === "paid" ? "success" : "warning"}>{String(invoice.status ?? "open")}</Badge>
+                      {invoice.attachmentData ? <CommandButton icon="file-eye-outline" label="Open file" onPress={() => openDataAttachment(String(invoice.attachmentName ?? "invoice"), String(invoice.attachmentData), String(invoice.attachmentMime ?? ""))} /> : null}
+                    </View>
+                  </View>
+                ))}
+              </Card>
+            ) : null}
             <TableCard minWidth={820}>
               <TableHeader columns={["Item", "Batch", "Expiry", "Ordered", "Qty", "Cost", "Total"]} />
               {lines.map((line) => (
@@ -425,19 +452,6 @@ function LabeledField({ label, style, inputStyle, ...props }: ComponentProps<typ
     <View style={[styles.fieldWrap, style]}>
       <Text style={styles.label}>{label}</Text>
       <Field {...props} style={inputStyle} />
-    </View>
-  );
-}
-
-function DateChooser({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <View style={styles.fieldWrap}>
-      <Text style={styles.label}>{label}</Text>
-      <Field value={value} onChangeText={onChange} placeholder="YYYY-MM-DD" keyboardType="numbers-and-punctuation" />
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-        {[30, 90, 180, 365].map((days) => <Pressable key={days} style={styles.chip} onPress={() => onChange(today(days))}><Text style={styles.chipText}>+{days} days</Text></Pressable>)}
-        <Pressable style={styles.chip} onPress={() => onChange("")}><Text style={styles.chipText}>No expiry</Text></Pressable>
-      </ScrollView>
     </View>
   );
 }
@@ -531,6 +545,8 @@ const styles = StyleSheet.create({
   checkRow: { minHeight: 46, flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, borderColor: colors.line, borderRadius: 8, paddingHorizontal: 10 },
   checkText: { color: colors.ink, fontWeight: "800", flex: 1 },
   invoiceBox: { gap: 12, padding: 12 },
+  invoiceLine: { flexDirection: "row", alignItems: "flex-start", gap: 10, borderWidth: 1, borderColor: colors.line, borderRadius: 7, padding: 10 },
+  invoiceActions: { alignItems: "flex-end", gap: 8 },
   totalStrip: { flexDirection: "row", flexWrap: "wrap", gap: 8, borderTopWidth: 1, borderTopColor: colors.line, paddingTop: 10 },
   totalLabel: { color: colors.muted, fontWeight: "800" },
   totalStrong: { color: colors.accent, fontWeight: "900" },

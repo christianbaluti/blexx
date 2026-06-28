@@ -205,7 +205,18 @@ export const api = {
       status: "completed" as const
     }));
   },
-  purchaseOrders: () => cached<PurchaseOrder[]>("purchase-orders", "/purchase-orders", []),
+  async purchaseOrders() {
+    const rows = await cached<Record<string, unknown>[]>("purchase-orders", "/purchase-orders", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      refNo: String(row.refNo ?? row.ref_no),
+      supplierId: String(row.supplierId ?? row.supplier_id ?? ""),
+      supplierName: row.supplierName ? String(row.supplierName) : undefined,
+      date: String(row.date ?? row.order_date ?? row.created_at ?? ""),
+      status: String(row.status ?? "ordered") as PurchaseOrder["status"],
+      total: Number(row.total ?? 0)
+    }));
+  },
   returns: () => cached<Record<string, unknown>[]>("returns", "/returns", []),
   receipts: () => cached<Record<string, unknown>[]>("receipts", "/receipts", []),
   expenses: () => cached<Expense[]>("expenses", "/expenses", []),
@@ -291,7 +302,25 @@ export const api = {
       note: row.note ? String(row.note) : null
     })) as GoodsReceivedNote[];
   },
-  supplierInvoices: () => cached<SupplierInvoice[]>("supplier-invoices", "/supplier-invoices", []),
+  async supplierInvoices() {
+    const rows = await cached<Record<string, unknown>[]>("supplier-invoices", "/supplier-invoices", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      refNo: String(row.refNo ?? row.ref_no),
+      supplierId: String(row.supplierId ?? row.supplier_id ?? ""),
+      supplierName: String(row.supplierName ?? ""),
+      invoiceDate: String(row.invoiceDate ?? row.invoice_date ?? ""),
+      dueDate: row.dueDate || row.due_date ? String(row.dueDate ?? row.due_date) : null,
+      total: Number(row.total ?? 0),
+      paid: Number(row.paid ?? 0),
+      status: String(row.status ?? "open") as SupplierInvoice["status"],
+      grnId: row.grnId || row.grn_id ? String(row.grnId ?? row.grn_id) : null,
+      grnRefNo: row.grnRefNo ? String(row.grnRefNo) : null,
+      attachmentName: row.attachmentName || row.attachment_name ? String(row.attachmentName ?? row.attachment_name) : null,
+      attachmentMime: row.attachmentMime || row.attachment_mime ? String(row.attachmentMime ?? row.attachment_mime) : null,
+      attachmentData: row.attachmentData || row.attachment_data ? String(row.attachmentData ?? row.attachment_data) : null
+    }));
+  },
   loyalty: () => cached<Record<string, unknown>[]>("loyalty", "/loyalty", []),
   credit: () => cached<Record<string, unknown>[]>("credit", "/credit", []),
   permissions: () => cached<Record<string, unknown>[]>("permissions", "/permissions", []),
@@ -449,6 +478,9 @@ export const api = {
   },
   updateSupplierInvoice(id: string, payload: Record<string, unknown>) {
     return request<{ ok: boolean }>(`/supplier-invoices/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+  },
+  recordSupplierInvoicePayment(id: string, payload: Record<string, unknown>) {
+    return request<{ ok: boolean }>(`/supplier-invoices/${id}/payments`, { method: "POST", body: JSON.stringify(payload) });
   },
   deleteSupplierInvoice(id: string) {
     return request<{ ok: boolean }>(`/supplier-invoices/${id}`, { method: "DELETE" });
