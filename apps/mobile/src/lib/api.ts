@@ -10,7 +10,6 @@ import type {
   DashboardSummary,
   Expense,
   FinancialStatement,
-  GlAccount,
   GlEntry,
   GoodsReceivedNote,
   InventoryBatch,
@@ -159,8 +158,8 @@ export const api = {
       sku: String(row.sku),
       barcode: row.barcode ? String(row.barcode) : null,
       name: String(row.name),
-      categoryId: null,
-      categoryName: null,
+      categoryId: row.categoryId || row.category_id ? String(row.categoryId ?? row.category_id) : null,
+      categoryName: row.categoryName || row.category_name ? String(row.categoryName ?? row.category_name) : null,
       unit: String(row.unit ?? "ea"),
       isRaw: false,
       isSellable: true,
@@ -190,7 +189,13 @@ export const api = {
       status: String(row.status ?? "active")
     }));
   },
-  categories: async () => [] as Category[],
+  async categories() {
+    const rows = await cached<Record<string, unknown>[]>("categories", "/categories", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      name: String(row.name ?? "")
+    })) as Category[];
+  },
   async suppliers() {
     const rows = await cached<Record<string, unknown>[]>("suppliers", "/suppliers", []);
     return rows.map((row) => ({
@@ -213,8 +218,8 @@ export const api = {
       phone: row.phone ? String(row.phone) : null,
       email: row.email ? String(row.email) : null,
       address: row.address ? String(row.address) : null,
-      loyaltyPoints: 0,
-      creditLimit: 0,
+      loyaltyPoints: Number(row.loyaltyPoints ?? row.loyalty_points ?? 0),
+      creditLimit: Number(row.creditLimit ?? row.credit_limit ?? 0),
       balance: Number(row.balance ?? 0),
       totalPurchases: Number(row.totalPurchases ?? 0),
       saleCount: Number(row.saleCount ?? 0),
@@ -403,7 +408,6 @@ export const api = {
     return request<{ ok: boolean }>(`/sessions/${id}/revoke`, { method: "POST" });
   },
   outlets: () => cached<Record<string, unknown>[]>("outlets", "/stock/locations", []),
-  glAccounts: async () => [] as GlAccount[],
   async ledger() {
     const rows = await cached<Record<string, unknown>[]>("ledger", "/finance/transactions", []);
     return rows.map((row) => ({
@@ -483,6 +487,7 @@ export const api = {
         name: payload.name,
         unit: payload.unit,
         sellingPrice: payload.price ?? payload.sellingPrice ?? 0,
+        categoryId: payload.categoryId ?? null,
         reorderLevel: payload.reorder ?? payload.reorderLevel ?? 0,
         imageData: payload.imageUrl ?? payload.imageData ?? null
       })
@@ -498,6 +503,7 @@ export const api = {
         sku: payload.sku,
         barcode: payload.barcode,
         name: payload.name,
+        categoryId: payload.categoryId,
         unit: payload.unit,
         sellingPrice: payload.price ?? payload.sellingPrice,
         reorderLevel: payload.reorder ?? payload.reorderLevel,
@@ -545,7 +551,17 @@ export const api = {
     return request<{ ok: boolean }>(`/customers/${id}/payment`, { method: "POST", body: JSON.stringify(payload) });
   },
   createExpense(payload: Record<string, unknown>) {
-    return request<{ id: string }>("/expenses", { method: "POST", body: JSON.stringify(payload) });
+    return request<{ id: string }>("/expenses", {
+      method: "POST",
+      body: JSON.stringify({
+        supplierInvoiceId: payload.supplierInvoiceId ?? null,
+        category: payload.category ?? payload.categoryId ?? "general",
+        description: payload.description ?? null,
+        amount: Number(payload.amount ?? 0),
+        expenseDate: payload.expenseDate ?? payload.date ?? null,
+        status: payload.status ?? "open"
+      })
+    });
   },
   createPurchaseOrder(payload: Record<string, unknown>) {
     return request<{ id: string; refNo: string }>("/purchase-orders", { method: "POST", body: JSON.stringify(payload) });
@@ -599,8 +615,16 @@ export const api = {
     });
   },
   receiveTransfer(id: string) {
-    void id;
-    return Promise.resolve({ ok: true });
+    return request<{ ok: boolean }>(`/transfers/${id}/receive`, { method: "POST" });
+  },
+  sendTransfer(id: string) {
+    return request<{ ok: boolean }>(`/transfers/${id}/send`, { method: "POST" });
+  },
+  cancelTransfer(id: string) {
+    return request<{ ok: boolean }>(`/transfers/${id}/cancel`, { method: "POST" });
+  },
+  voidSale(id: string, reason: string) {
+    return request<{ ok: boolean }>(`/sales/${id}/void`, { method: "POST", body: JSON.stringify({ reason }) });
   },
   createBom(payload: Record<string, unknown>) {
     return request<{ id: string }>("/blueprints", { method: "POST", body: JSON.stringify(payload) });

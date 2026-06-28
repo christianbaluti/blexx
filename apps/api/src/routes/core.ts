@@ -5,6 +5,7 @@ import PDFDocument from "pdfkit";
 import { z } from "zod";
 import { numberify, pool } from "../db.js";
 import { config } from "../config.js";
+import { actorId, installCoreAuthorization } from "../authz.js";
 
 type DbClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
@@ -234,7 +235,10 @@ const supplierSchema = z.object({
   note: nullableText
 });
 
-const customerSchema = supplierSchema.omit({ note: true });
+const customerSchema = supplierSchema.omit({ note: true }).extend({
+  creditLimit: z.number().nonnegative().optional(),
+  loyaltyPoints: z.number().int().nonnegative().optional()
+});
 
 const itemSchema = z.object({
   sku: z.string().trim().min(1),
@@ -248,10 +252,24 @@ const productSchema = z.object({
   sku: z.string().trim().min(1),
   barcode: nullableText,
   name: z.string().trim().min(1),
+  categoryId: z.string().uuid().nullable().optional(),
   unit: z.string().trim().default("ea"),
   sellingPrice: z.number().nonnegative().default(0),
   reorderLevel: z.number().nonnegative().default(0),
   imageData: dataUrl
+});
+
+const categorySchema = z.object({
+  name: z.string().trim().min(1),
+  parentId: z.string().uuid().nullable().optional()
+});
+
+const brandingSchema = z.object({
+  appName: z.string().trim().min(1).default("POS & Inventory +"),
+  appSubtitle: z.string().trim().default("Sales, stock and operations"),
+  logoDataUrl: dataUrl,
+  iconDataUrl: dataUrl,
+  logoUpdatedAt: nullableText
 });
 
 const poSchema = z.object({
@@ -348,7 +366,7 @@ const transferSchema = z.object({
 
 const saleSchema = z.object({
   customerId: z.string().uuid().nullable().optional(),
-  cashierId: z.string().uuid(),
+  cashierId: z.string().uuid().nullable().optional(),
   paymentMethod: z.enum(["cash", "card", "mobile", "bank", "credit"]),
   discount: z.number().nonnegative().default(0),
   items: z.array(z.object({
@@ -377,7 +395,48 @@ const userSchema = z.object({
   role: z.string().default("pos_cashier")
 });
 
+const expenseSchema = z.object({
+  supplierInvoiceId: z.string().uuid().nullable().optional(),
+  category: z.string().trim().min(1).default("general"),
+  description: nullableText,
+  amount: z.number().nonnegative(),
+  expenseDate: nullableText,
+  status: z.enum(["open", "partial", "paid", "void"]).default("open")
+});
+
+const stockCountSchema = z.object({
+  outletId: z.string().min(1).optional(),
+  locationId: z.string().uuid().nullable().optional(),
+  note: nullableText
+});
+
+const returnSchema = z.object({
+  saleId: z.string().uuid(),
+  reason: z.string().trim().min(1),
+  refundMethod: z.enum(["cash", "card", "mobile", "bank", "credit"]).default("cash"),
+  items: z.array(z.object({
+    saleItemId: z.string().uuid().optional(),
+    productId: z.string().uuid(),
+    quantity: z.number().positive()
+  })).min(1)
+});
+
+const syncPushSchema = z.object({
+  deviceId: z.string().trim().min(1),
+  mutations: z.array(z.object({
+    id: z.string().uuid(),
+    entity: z.string().trim().min(1),
+    operation: z.enum(["create", "update", "delete"]),
+    payload: z.unknown(),
+    clientTs: z.string().optional(),
+    attempts: z.number().optional(),
+    status: z.string().optional()
+  })).default([])
+});
+
 export async function registerCoreRoutes(app: FastifyInstance) {
+  installCoreAuthorization(app);
+
   const defaultSettings = {
     company: {
       tradingName: "POS & Inventory +",
@@ -405,17 +464,15 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     }
   };
 
-  app.get("/settings/branding", async () => ({
+  const defaultBranding = {
     appName: "POS & Inventory +",
-    appSubtitle: "POS and inventory management",
+    appSubtitle: "Sales, stock and operations",
     logoDataUrl: null,
     iconDataUrl: null,
     logoUpdatedAt: null
-  }));
+  };
 
-  app.patch("/settings/branding", async (request) => request.body);
-
-  app.get("/settings", async () => {
+  async function loadSettings() {
     const result = await pool.query("select value from app_settings where key = 'settings'");
     const saved = result.rows[0]?.value as Partial<typeof defaultSettings> | undefined;
     return {
@@ -427,21 +484,257 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       notifications: { ...defaultSettings.notifications, ...saved?.notifications },
       emailTemplates: { ...defaultSettings.emailTemplates, ...saved?.emailTemplates }
     };
-  });
+  }
 
-  app.patch("/settings", async (request) => {
-    const value = request.body ?? defaultSettings;
+  async function loadBranding() {
+    const result = await pool.query("select value from app_settings where key = 'branding'");
+    const saved = result.rows[0]?.value as Partial<typeof defaultBranding> | undefined;
+    return { ...defaultBranding, ...saved };
+  }
+
+  app.get("/settings/branding", async () => loadBranding());
+
+  app.patch("/settings/branding", async (request) => {
+    const body = brandingSchema.partial().parse(request.body ?? {});
+    if (body.logoDataUrl && Buffer.byteLength(body.logoDataUrl, "utf8") > 140_000) throw app.httpErrors.badRequest("Logo must be under 100 KB after optimization");
+    if (body.iconDataUrl && Buffer.byteLength(body.iconDataUrl, "utf8") > 140_000) throw app.httpErrors.badRequest("Icon must be under 100 KB after optimization");
+    const current = await loadBranding();
+    const value = {
+      ...current,
+      ...body,
+      logoUpdatedAt: body.logoUpdatedAt ?? (body.logoDataUrl || body.iconDataUrl ? new Date().toISOString() : current.logoUpdatedAt)
+    };
     await pool.query(
-      `insert into app_settings (key, value) values ('settings', $1::jsonb)
-       on conflict (key) do update set value = excluded.value`,
+      `insert into app_settings (key, value, updated_at) values ('branding', $1::jsonb, now())
+       on conflict (key) do update set value = excluded.value, updated_at = now()`,
       [JSON.stringify(value)]
     );
     return value;
   });
 
-  app.get("/sync/health", async () => ({ online: true, pending: 0, conflicts: 0, failed: 0, lastSyncedAt: new Date().toISOString() }));
-  app.get("/backup", async () => []);
-  app.post("/backup", async () => ({ id: ref("BKP"), name: "Manual backup", createdAt: new Date().toISOString(), status: "created" }));
+  app.get("/settings", async () => loadSettings());
+
+  app.patch("/settings", async (request) => {
+    const current = await loadSettings();
+    const incoming = request.body as Partial<typeof defaultSettings> | undefined;
+    const value = {
+      ...current,
+      ...incoming,
+      company: { ...current.company, ...incoming?.company },
+      downloads: { ...current.downloads, ...incoming?.downloads },
+      security: { ...current.security, ...incoming?.security },
+      notifications: { ...current.notifications, ...incoming?.notifications },
+      emailTemplates: { ...current.emailTemplates, ...incoming?.emailTemplates }
+    };
+    await pool.query(
+      `insert into app_settings (key, value, updated_at) values ('settings', $1::jsonb, now())
+       on conflict (key) do update set value = excluded.value, updated_at = now()`,
+      [JSON.stringify(value)]
+    );
+    return value;
+  });
+
+  app.get("/sync/health", async () => {
+    const result = await pool.query(`
+      select
+        coalesce((select count(*) from sync_mutations where status = 'pending'), 0) as pending,
+        coalesce((select count(*) from sync_mutations where status = 'failed'), 0) as failed,
+        coalesce((select count(*) from sync_conflicts where status = 'open'), 0) as conflicts,
+        (select max(applied_at) from sync_mutations where status = 'accepted') as "lastSyncedAt"
+    `);
+    const row = result.rows[0];
+    return {
+      online: true,
+      pending: Number(row.pending),
+      conflicts: Number(row.conflicts),
+      failed: Number(row.failed),
+      lastSyncedAt: row.lastSyncedAt ? String(row.lastSyncedAt) : new Date().toISOString()
+    };
+  });
+
+  app.post("/sync/push", async (request) => {
+    const body = syncPushSchema.parse(request.body ?? {});
+    const userId = actorId(request);
+    let accepted = 0;
+    const conflicts: Record<string, unknown>[] = [];
+
+    for (const mutation of body.mutations) {
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        const existing = await client.query("select id, status from sync_mutations where id = $1", [mutation.id]);
+        if (existing.rows[0]) {
+          if (existing.rows[0].status === "accepted") accepted += 1;
+          await client.query("commit");
+          continue;
+        }
+
+        await client.query(
+          `insert into sync_mutations (id, device_id, entity, operation, payload, status)
+           values ($1,$2,$3,$4,$5::jsonb,'pending')`,
+          [mutation.id, body.deviceId, mutation.entity, mutation.operation, JSON.stringify(mutation.payload)]
+        );
+
+      if (mutation.operation === "create" && ["customer", "customers"].includes(mutation.entity)) {
+          const payload = customerSchema.parse(mutation.payload);
+          await client.query(
+            "insert into customers (name, phone, email, address, credit_limit, loyalty_points) values ($1,$2,$3,$4,$5,$6)",
+            [payload.name, payload.phone ?? null, payload.email ?? null, payload.address ?? null, payload.creditLimit ?? 0, payload.loyaltyPoints ?? 0]
+          );
+          await client.query("update sync_mutations set status = 'accepted', applied_at = now() where id = $1", [mutation.id]);
+          accepted += 1;
+        } else if (mutation.operation === "create" && ["sale", "sales"].includes(mutation.entity)) {
+          const payload = mutation.payload as Record<string, unknown>;
+          const rawLines = Array.isArray(payload.items) ? payload.items : Array.isArray(payload.lines) ? payload.lines : [];
+          const normalized = saleSchema.parse({
+            customerId: payload.customerId ?? null,
+            paymentMethod: payload.paymentMethod ?? payload.payment ?? "cash",
+            discount: Number(payload.discount ?? 0),
+            items: rawLines.map((line) => {
+              const row = line as Record<string, unknown>;
+              return {
+                productId: row.productId,
+                quantity: Number(row.quantity ?? row.qty ?? 0),
+                unitPrice: Number(row.unitPrice ?? row.price ?? 0),
+                discount: Number(row.discount ?? 0)
+              };
+            })
+          });
+          const shopId = await defaultLocation("shop", client);
+          let subtotal = 0;
+          let cogs = 0;
+          for (const line of normalized.items) {
+            await assertShopProduct(client, line.productId, line.quantity);
+            const product = await client.query("select average_cost from products where id = $1", [line.productId]);
+            subtotal += line.quantity * line.unitPrice - line.discount;
+            cogs += line.quantity * numberify(product.rows[0]?.average_cost);
+          }
+          const total = Math.max(0, subtotal - normalized.discount);
+          if (normalized.paymentMethod === "credit") {
+            if (!normalized.customerId) throw app.httpErrors.badRequest("Credit sales require a customer.");
+            const credit = await client.query(`
+              select c.credit_limit, greatest(0, coalesce(sum(s.total), 0) - coalesce((select sum(p.amount) from payments p where p.customer_id = c.id), 0)) as balance
+              from customers c
+              left join sales s on s.customer_id = c.id and s.payment_method = 'credit' and s.status <> 'void'
+              where c.id = $1
+              group by c.id
+            `, [normalized.customerId]);
+            const remaining = numberify(credit.rows[0]?.credit_limit) - numberify(credit.rows[0]?.balance);
+            if (remaining < total) throw app.httpErrors.badRequest(`Customer credit limit exceeded. Available credit: ${formatMoney(remaining)}`);
+          }
+          const sale = await client.query(
+            `insert into sales (ref_no, customer_id, cashier_id, subtotal, discount, total, payment_method)
+             values ($1,$2,$3,$4,$5,$6,$7) returning id`,
+            [ref("SL"), normalized.customerId ?? null, userId, subtotal, normalized.discount, total, normalized.paymentMethod]
+          );
+          for (const line of normalized.items) {
+            const product = await client.query("select average_cost from products where id = $1", [line.productId]);
+            const unitCost = numberify(product.rows[0]?.average_cost);
+            await client.query(
+              `insert into sale_items (sale_id, product_id, quantity, unit_price, discount, unit_cost, line_total)
+               values ($1,$2,$3,$4,$5,$6,$7)`,
+              [sale.rows[0].id, line.productId, line.quantity, line.unitPrice, line.discount, unitCost, line.quantity * line.unitPrice - line.discount]
+            );
+            await updateShopProduct(client, line.productId, -line.quantity);
+            await client.query(
+              `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+               values ($1,$2,'out',$3,$4,'sale',$5,$6,'Offline POS sale replay')`,
+              [shopId, line.productId, line.quantity, unitCost, sale.rows[0].id, userId]
+            );
+          }
+          if (normalized.paymentMethod !== "credit") {
+            await client.query("insert into payments (party_type, customer_id, sale_id, method, amount) values ('customer',$1,$2,$3,$4)", [normalized.customerId ?? null, sale.rows[0].id, normalized.paymentMethod, total]);
+          }
+          await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale',$1,$2,'Offline POS sale')", [sale.rows[0].id, total]);
+          await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale',$1,$2,'Offline COGS')", [sale.rows[0].id, cogs]);
+          await client.query("update sync_mutations set status = 'accepted', applied_at = now() where id = $1", [mutation.id]);
+          accepted += 1;
+        } else {
+          const conflict = await client.query(
+            `insert into sync_conflicts (device_id, entity, entity_id, local_payload, reason)
+             values ($1,$2,$3,$4::jsonb,$5)
+             returning id as "conflictId", entity, entity_id as "entityId", local_payload as local, remote_payload as remote, reason, created_at as "createdAt"`,
+            [body.deviceId, mutation.entity, mutation.id, JSON.stringify(mutation.payload), "This offline mutation type is not supported yet."]
+          );
+          await client.query("update sync_mutations set status = 'conflict', error = $2 where id = $1", [mutation.id, "Unsupported offline mutation"]);
+          conflicts.push(conflict.rows[0]);
+        }
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback");
+        const conflict = await pool.query(
+          `insert into sync_conflicts (device_id, entity, entity_id, local_payload, reason)
+           values ($1,$2,$3,$4::jsonb,$5)
+           returning id as "conflictId", entity, entity_id as "entityId", local_payload as local, remote_payload as remote, reason, created_at as "createdAt"`,
+          [body.deviceId, mutation.entity, mutation.id, JSON.stringify(mutation.payload), error instanceof Error ? error.message : "Sync failed"]
+        );
+        await pool.query(
+          `insert into sync_mutations (id, device_id, entity, operation, payload, status, error)
+           values ($1,$2,$3,$4,$5::jsonb,'conflict',$6)
+           on conflict (id) do update set status = 'conflict', error = excluded.error`,
+          [mutation.id, body.deviceId, mutation.entity, mutation.operation, JSON.stringify(mutation.payload), conflict.rows[0].reason]
+        );
+        conflicts.push(conflict.rows[0]);
+      } finally {
+        client.release();
+      }
+    }
+
+    return { accepted, conflicts };
+  });
+
+  app.get("/sync/pull", async () => {
+    const [products, customers, shopStock] = await Promise.all([
+      pool.query("select id, sku, barcode, name, category_id as \"categoryId\", unit, selling_price as \"sellingPrice\", average_cost as \"averageCost\", updated_at as \"updatedAt\" from products where status = 'active' order by updated_at desc limit 500"),
+      pool.query("select id, name, phone, email, address, updated_at as \"updatedAt\" from customers where status = 'active' order by updated_at desc limit 500"),
+      pool.query("select product_id as \"productId\", quantity, updated_at as \"updatedAt\" from shop_stock order by updated_at desc limit 500")
+    ]);
+    return {
+      serverTime: new Date().toISOString(),
+      products: products.rows,
+      customers: customers.rows,
+      shopStock: shopStock.rows
+    };
+  });
+
+  app.get("/sync/conflicts", async () => {
+    const result = await pool.query(`
+      select id as "conflictId", entity, entity_id as "entityId", local_payload as local,
+             remote_payload as remote, reason, created_at as "createdAt"
+      from sync_conflicts
+      where status = 'open'
+      order by created_at desc
+      limit 100
+    `);
+    return result.rows;
+  });
+
+  app.post("/sync/conflicts/:id/resolve", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const result = await pool.query("update sync_conflicts set status = 'resolved', resolved_by = $2, resolved_at = now() where id = $1 and status = 'open' returning id", [id, actorId(request)]);
+    if (!result.rowCount) throw app.httpErrors.notFound("Sync conflict not found");
+    return { ok: true };
+  });
+
+  app.get("/backup", async () => {
+    const result = await pool.query(`
+      select id, name, created_at as "createdAt", size_bytes as "sizeBytes", status
+      from backup_records
+      order by created_at desc
+      limit 100
+    `);
+    return result.rows.map((row) => ({ ...row, sizeBytes: Number(row.sizeBytes) }));
+  });
+
+  app.post("/backup", async (request) => {
+    const result = await pool.query(
+      `insert into backup_records (name, status, size_bytes, created_by, completed_at)
+       values ($1, 'ready', 0, $2, now())
+       returning id, name, created_at as "createdAt", size_bytes as "sizeBytes", status`,
+      [`Manual backup ${new Date().toISOString()}`, actorId(request)]
+    );
+    return { ...result.rows[0], sizeBytes: Number(result.rows[0].sizeBytes) };
+  });
 
   app.get("/dashboard", async () => {
     const [summary, trend, topProducts] = await Promise.all([
@@ -483,30 +776,106 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get("/notifications", async () => {
-    const lowStock = await pool.query(`
-      select p.id, p.name, coalesce(ss.quantity, 0) as quantity, p.reorder_level as "reorderLevel"
-      from products p
-      left join shop_stock ss on ss.product_id = p.id
-      where p.reorder_level > 0 and coalesce(ss.quantity, 0) <= p.reorder_level
-      order by coalesce(ss.quantity, 0), p.name
-      limit 25
-    `);
-    return lowStock.rows.map((row) => ({
-      id: `low-stock-${row.id}`,
-      ts: new Date().toISOString(),
-      type: "low_stock",
-      title: `${row.name} is low in shop stock`,
-      body: `${numberify(row.quantity)} available; reorder point is ${numberify(row.reorderLevel)}.`,
-      read: false,
-      channel: "in_app",
-      status: "pending"
-    }));
+  app.get("/notifications", async (request) => {
+    const [saved, lowStock, overdueInvoices] = await Promise.all([
+      pool.query(`
+        select id, created_at as ts, type, title, body, read_at is not null as read, 'in_app' as channel, status
+        from notifications
+        where user_id is null or user_id = $1
+        order by created_at desc
+        limit 100
+      `, [actorId(request)]).catch(() => ({ rows: [] as Record<string, unknown>[] })),
+      pool.query(`
+        select p.id, p.name, coalesce(ss.quantity, 0) as quantity, p.reorder_level as "reorderLevel"
+        from products p
+        left join shop_stock ss on ss.product_id = p.id
+        where p.reorder_level > 0 and coalesce(ss.quantity, 0) <= p.reorder_level
+        order by coalesce(ss.quantity, 0), p.name
+        limit 25
+      `),
+      pool.query(`
+        select id, ref_no, due_date, total, paid
+        from supplier_invoices
+        where due_date < current_date and status in ('open', 'partial')
+        order by due_date
+        limit 25
+      `)
+    ]);
+    const dynamic = [
+      ...lowStock.rows.map((row) => ({
+        id: `low-stock-${row.id}`,
+        ts: new Date().toISOString(),
+        type: "low_stock",
+        title: `${row.name} is low in shop stock`,
+        body: `${numberify(row.quantity)} available; reorder point is ${numberify(row.reorderLevel)}.`,
+        read: false,
+        channel: "in_app",
+        status: "pending"
+      })),
+      ...overdueInvoices.rows.map((row) => ({
+        id: `overdue-invoice-${row.id}`,
+        ts: new Date().toISOString(),
+        type: "system",
+        title: `Supplier invoice ${row.ref_no} is overdue`,
+        body: `${formatMoney(numberify(row.total) - numberify(row.paid))} remains payable.`,
+        read: false,
+        channel: "in_app",
+        status: "pending"
+      }))
+    ];
+    return [...saved.rows, ...dynamic];
   });
 
-  app.post("/notifications/:id/read", async () => ({ ok: true }));
+  app.post("/notifications/:id/read", async (request) => {
+    const rawId = (request.params as { id?: string }).id ?? "";
+    if (/^[0-9a-f-]{36}$/i.test(rawId)) {
+      await pool.query("update notifications set read_at = now() where id = $1", [rawId]);
+    }
+    return { ok: true };
+  });
 
   app.get("/stock/locations", async () => (await pool.query("select id, code, name, type, address from stock_locations order by type, name")).rows);
+
+  app.get("/categories", async () => {
+    const result = await pool.query(`
+      select id, name, parent_id as "parentId"
+      from categories
+      where status = 'active'
+      order by name
+    `);
+    return result.rows;
+  });
+
+  app.post("/categories", async (request, reply) => {
+    const body = categorySchema.parse(request.body);
+    const result = await pool.query(
+      "insert into categories (name, parent_id) values ($1,$2) returning id",
+      [body.name, body.parentId ?? null]
+    );
+    return reply.code(201).send({ id: result.rows[0].id });
+  });
+
+  app.patch("/categories/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const body = categorySchema.partial().parse(request.body);
+    const result = await pool.query(
+      `update categories
+       set name = coalesce($2, name), parent_id = case when $3::boolean then $4 else parent_id end, updated_at = now()
+       where id = $1 and status = 'active'
+       returning id`,
+      [id, body.name ?? null, Object.prototype.hasOwnProperty.call(body, "parentId"), body.parentId ?? null]
+    );
+    if (!result.rowCount) throw app.httpErrors.notFound("Category not found");
+    return { ok: true };
+  });
+
+  app.delete("/categories/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const linked = await pool.query("select 1 from products where category_id = $1 and status = 'active' limit 1", [id]);
+    if (linked.rows.length) throw app.httpErrors.conflict("Category is used by products. Archive products or move them first.");
+    await pool.query("update categories set status = 'disabled', updated_at = now() where id = $1", [id]);
+    return { ok: true };
+  });
 
   app.get("/suppliers", async () => {
     const result = await pool.query(`
@@ -638,8 +1007,9 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     const result = await pool.query(`
       select p.id, p.sku, p.barcode, p.name, p.unit, p.selling_price as "sellingPrice", p.average_cost as "averageCost",
              p.reorder_level as "reorderLevel", p.image_data as "imageData", coalesce(ws.quantity, 0) as "warehouseStock",
-             coalesce(ss.quantity, 0) as "shopStock", p.status
+             coalesce(ss.quantity, 0) as "shopStock", p.status, p.category_id as "categoryId", c.name as "categoryName"
       from products p
+      left join categories c on c.id = p.category_id
       left join warehouse_stock ws on ws.product_id = p.id
       left join shop_stock ss on ss.product_id = p.id
       order by p.name
@@ -659,9 +1029,9 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     if (body.imageData && Buffer.byteLength(body.imageData, "utf8") > 140_000) throw app.httpErrors.badRequest("Product image must be under 100 KB after optimization");
     const mime = body.imageData?.match(/^data:([^;]+);/)?.[1] ?? null;
     const result = await pool.query(
-      `insert into products (sku, barcode, name, unit, selling_price, reorder_level, image_data, image_mime)
-       values ($1,$2,$3,$4,$5,$6,$7,$8) returning id`,
-      [body.sku, body.barcode ?? null, body.name, body.unit, body.sellingPrice, body.reorderLevel, body.imageData ?? null, mime]
+      `insert into products (sku, barcode, name, category_id, unit, selling_price, reorder_level, image_data, image_mime)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id`,
+      [body.sku, body.barcode ?? null, body.name, body.categoryId ?? null, body.unit, body.sellingPrice, body.reorderLevel, body.imageData ?? null, mime]
     );
     return reply.code(201).send({ id: result.rows[0].id });
   });
@@ -673,10 +1043,22 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     const mime = body.imageData?.match(/^data:([^;]+);/)?.[1] ?? null;
     await pool.query(
       `update products set sku = coalesce($2, sku), barcode = coalesce($3, barcode), name = coalesce($4, name),
-       unit = coalesce($5, unit), selling_price = coalesce($6, selling_price), reorder_level = coalesce($7, reorder_level),
-       image_data = coalesce($8, image_data), image_mime = coalesce($9, image_mime), updated_at = now()
+       category_id = case when $5::boolean then $6 else category_id end,
+       unit = coalesce($7, unit), selling_price = coalesce($8, selling_price), reorder_level = coalesce($9, reorder_level),
+       image_data = coalesce($10, image_data), image_mime = coalesce($11, image_mime), updated_at = now()
        where id = $1`,
-      [id, body.sku ?? null, body.barcode ?? null, body.name ?? null, body.unit ?? null, body.sellingPrice ?? null, body.reorderLevel ?? null, body.imageData ?? null, mime]
+      [
+        id,
+        body.sku ?? null,
+        body.barcode ?? null,
+        body.name ?? null,
+        Object.prototype.hasOwnProperty.call(body, "categoryId"), body.categoryId ?? null,
+        body.unit ?? null,
+        body.sellingPrice ?? null,
+        body.reorderLevel ?? null,
+        body.imageData ?? null,
+        mime
+      ]
     );
     return { ok: true };
   });
@@ -696,6 +1078,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.post("/purchase-orders", async (request, reply) => {
     const body = poSchema.parse(request.body);
+    const userId = actorId(request);
     const subtotal = body.items.reduce((sum, line) => sum + line.quantity * line.unitCost, 0);
     const total = subtotal + body.landedCost;
     const client = await pool.connect();
@@ -704,7 +1087,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       const po = await client.query(
         `insert into purchase_orders (ref_no, supplier_id, expected_date, note, landed_cost, subtotal, total, status, created_by)
          values ($1,$2,$3,$4,$5,$6,$7,'ordered',$8) returning id, ref_no`,
-        [ref("PO"), body.supplierId, body.expectedDate ?? null, body.note ?? null, body.landedCost, subtotal, total, body.createdBy ?? null]
+        [ref("PO"), body.supplierId, body.expectedDate ?? null, body.note ?? null, body.landedCost, subtotal, total, userId]
       );
       for (const line of body.items) {
         let itemId = line.itemId;
@@ -848,6 +1231,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.post("/grns", async (request, reply) => {
     const body = grnSchema.parse(request.body);
+    const userId = actorId(request);
     const locationId = body.locationId ?? await defaultLocation("warehouse");
     const extraCostTotal = body.invoiceExtraCosts.reduce((sum, cost) => sum + cost.amount, 0);
     const goodsTotal = body.items.reduce((sum, line) => sum + line.quantity * line.unitCost, 0);
@@ -858,7 +1242,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       const grn = await client.query(
         `insert into grns (ref_no, purchase_order_id, supplier_id, location_id, received_by, note, total)
          values ($1,$2,$3,$4,$5,$6,$7) returning id, ref_no`,
-        [ref("GRN"), body.purchaseOrderId ?? null, body.supplierId, locationId, body.receivedBy ?? null, body.note ?? null, invoiceTotal]
+        [ref("GRN"), body.purchaseOrderId ?? null, body.supplierId, locationId, userId, body.note ?? null, invoiceTotal]
       );
       const grnId = grn.rows[0].id as string;
       const grnRef = grn.rows[0].ref_no as string;
@@ -911,7 +1295,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         await client.query(
           `insert into stock_movements (location_id, item_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
            values ($1,$2,'in',$3,$4,'grn',$5,$6,'Goods received')`,
-          [locationId, itemId, line.quantity, landedUnitCost, grnId, body.receivedBy ?? null]
+          [locationId, itemId, line.quantity, landedUnitCost, grnId, userId]
         );
       }
       if (body.purchaseOrderId) {
@@ -1167,6 +1551,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.post("/production", async (request, reply) => {
     const body = productionSchema.parse(request.body);
+    const userId = actorId(request);
     const warehouseId = await defaultLocation("warehouse");
     const client = await pool.connect();
     try {
@@ -1190,7 +1575,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       const batch = await client.query(
         `insert into production_batches (ref_no, blueprint_id, warehouse_location_id, quantity_to_produce, quantity_produced, quantity_wasted, extra_cost, total_cost, unit_cost, selling_price, produced_by)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning id, ref_no`,
-        [ref("PB"), body.blueprintId, warehouseId, body.quantityToProduce, body.quantityProduced, body.quantityWasted, body.extraCost, totalCost, unitCost, body.sellingPrice ?? null, body.producedBy ?? null]
+        [ref("PB"), body.blueprintId, warehouseId, body.quantityToProduce, body.quantityProduced, body.quantityWasted, body.extraCost, totalCost, unitCost, body.sellingPrice ?? null, userId]
       );
       for (const line of components.rows) {
         const requiredQty = numberify(line.quantity) * factor;
@@ -1203,7 +1588,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         await client.query(
           `insert into stock_movements (location_id, item_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
            values ($1,$2,'out',$3,$4,'production',$5,$6,'Raw item consumed')`,
-          [warehouseId, line.item_id, requiredQty, line.average_cost, batch.rows[0].id, body.producedBy ?? null]
+          [warehouseId, line.item_id, requiredQty, line.average_cost, batch.rows[0].id, userId]
         );
       }
       await updateWarehouseProduct(client, bp.rows[0].product_id, body.quantityProduced);
@@ -1211,7 +1596,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       await client.query(
         `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
          values ($1,$2,'in',$3,$4,'production',$5,$6,'Finished product produced')`,
-        [warehouseId, bp.rows[0].product_id, body.quantityProduced, unitCost, batch.rows[0].id, body.producedBy ?? null]
+        [warehouseId, bp.rows[0].product_id, body.quantityProduced, unitCost, batch.rows[0].id, userId]
       );
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('production_cost','production_batch',$1,$2,'Production cost')", [batch.rows[0].id, totalCost]);
       await client.query("commit");
@@ -1292,6 +1677,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.post("/inventory/adjustments", async (request) => {
     const body = stockAdjustmentSchema.parse(request.body);
+    const userId = actorId(request);
     const client = await pool.connect();
     try {
       await client.query("begin");
@@ -1318,7 +1704,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         await client.query(
           `insert into stock_movements (location_id, item_id, direction, quantity, unit_cost, ref_type, user_id, note)
            values ($1,$2,$3,$4,$5,'adjustment',$6,$7)`,
-          [locationId, body.itemId, direction, qty, numberify(item.rows[0]?.average_cost), body.userId ?? null, note]
+          [locationId, body.itemId, direction, qty, numberify(item.rows[0]?.average_cost), userId, note]
         );
       } else if (body.productId) {
         if (locationType === "shop") {
@@ -1332,7 +1718,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         await client.query(
           `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, user_id, note)
            values ($1,$2,$3,$4,$5,'adjustment',$6,$7)`,
-          [locationId, body.productId, direction, qty, numberify(product.rows[0]?.average_cost), body.userId ?? null, note]
+          [locationId, body.productId, direction, qty, numberify(product.rows[0]?.average_cost), userId, note]
         );
       }
 
@@ -1346,29 +1732,52 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get("/stock-counts", async () => []);
+  app.get("/stock-counts", async () => {
+    const result = await pool.query(`
+      select sc.id, sc.location_id as "outletId", l.name as "outletName", sc.status,
+             sc.created_at as "createdAt", sc.closed_at as "closedAt",
+             coalesce(sum(abs(scl.variance_qty)), 0) as variance
+      from stock_counts sc
+      join stock_locations l on l.id = sc.location_id
+      left join stock_count_lines scl on scl.stock_count_id = sc.id
+      group by sc.id, l.name
+      order by sc.created_at desc
+      limit 100
+    `);
+    return result.rows.map((row) => ({
+      ...row,
+      variance: numberify(row.variance)
+    }));
+  });
 
-  app.post("/transfers", async (request, reply) => {
-    const body = transferSchema.parse(request.body);
-    const warehouseId = await defaultLocation("warehouse");
-    const shopId = await defaultLocation("shop");
+  app.post("/stock-counts", async (request, reply) => {
+    const body = stockCountSchema.parse(request.body ?? {});
+    const userId = actorId(request);
+    let locationId = body.locationId ?? body.outletId ?? "warehouse";
+    if (locationId === "warehouse" || locationId === "shop") locationId = await defaultLocation(locationId);
     const client = await pool.connect();
     try {
       await client.query("begin");
-      await assertWarehouseProduct(client, body.productId, body.quantity);
-      await updateWarehouseProduct(client, body.productId, -body.quantity);
-      await updateShopProduct(client, body.productId, body.quantity);
-      const transfer = await client.query(
-        `insert into stock_transfers (ref_no, from_location_id, to_location_id, product_id, quantity, transferred_by, note)
-         values ($1,$2,$3,$4,$5,$6,$7) returning id, ref_no`,
-        [ref("TR"), warehouseId, shopId, body.productId, body.quantity, body.transferredBy ?? null, body.note ?? null]
+      const location = await client.query("select id, type from stock_locations where id = $1", [locationId]);
+      if (!location.rows[0]) throw app.httpErrors.notFound("Stock location not found");
+      const count = await client.query(
+        "insert into stock_counts (location_id, created_by, note) values ($1,$2,$3) returning id",
+        [locationId, userId, body.note ?? null]
       );
-      const product = await client.query("select average_cost from products where id = $1", [body.productId]);
-      const unitCost = numberify(product.rows[0]?.average_cost);
-      await client.query("insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note) values ($1,$2,'out',$3,$4,'transfer',$5,$6,'Warehouse to shop')", [warehouseId, body.productId, body.quantity, unitCost, transfer.rows[0].id, body.transferredBy ?? null]);
-      await client.query("insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note) values ($1,$2,'in',$3,$4,'transfer',$5,$6,'Warehouse to shop')", [shopId, body.productId, body.quantity, unitCost, transfer.rows[0].id, body.transferredBy ?? null]);
+      const countId = count.rows[0].id as string;
+      if (location.rows[0].type === "shop") {
+        await client.query(`
+          insert into stock_count_lines (stock_count_id, product_id, expected_qty)
+          select $1, product_id, quantity from shop_stock
+        `, [countId]);
+      } else {
+        await client.query(`
+          insert into stock_count_lines (stock_count_id, item_id, product_id, expected_qty)
+          select $1, item_id, product_id, quantity from warehouse_stock
+        `, [countId]);
+      }
       await client.query("commit");
-      return reply.code(201).send({ id: transfer.rows[0].id, refNo: transfer.rows[0].ref_no });
+      return reply.code(201).send({ id: countId });
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -1377,12 +1786,124 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     }
   });
 
+  app.get("/stock-counts/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const [count, lines] = await Promise.all([
+      pool.query(`
+        select sc.*, l.name as "outletName", l.type as "locationType"
+        from stock_counts sc join stock_locations l on l.id = sc.location_id
+        where sc.id = $1
+      `, [id]),
+      pool.query(`
+        select scl.id, scl.item_id as "itemId", scl.product_id as "productId",
+               coalesce(i.name, p.name) as name, coalesce(i.sku, p.sku) as sku,
+               coalesce(i.unit, p.unit) as unit, scl.expected_qty as "expectedQty",
+               scl.counted_qty as "countedQty", scl.variance_qty as "varianceQty"
+        from stock_count_lines scl
+        left join items i on i.id = scl.item_id
+        left join products p on p.id = scl.product_id
+        where scl.stock_count_id = $1
+        order by name
+      `, [id])
+    ]);
+    if (!count.rows[0]) throw app.httpErrors.notFound("Stock count not found");
+    return { ...count.rows[0], lines: lines.rows.map((line) => ({ ...line, expectedQty: numberify(line.expectedQty), countedQty: line.countedQty == null ? null : numberify(line.countedQty), varianceQty: numberify(line.varianceQty) })) };
+  });
+
+  app.patch("/stock-counts/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const body = z.object({
+      lines: z.array(z.object({ id: z.string().uuid(), countedQty: z.number().nonnegative() })).default([])
+    }).parse(request.body ?? {});
+    const count = await pool.query("select status from stock_counts where id = $1", [id]);
+    if (!count.rows[0]) throw app.httpErrors.notFound("Stock count not found");
+    if (count.rows[0].status !== "open") throw app.httpErrors.badRequest("Only open stock counts can be edited.");
+    for (const line of body.lines) {
+      await pool.query("update stock_count_lines set counted_qty = $3 where id = $1 and stock_count_id = $2", [line.id, id, line.countedQty]);
+    }
+    return { ok: true };
+  });
+
+  app.post("/stock-counts/:id/submit", async (request) => {
+    const { id } = idParam.parse(request.params);
+    await pool.query("update stock_counts set status = 'submitted', submitted_at = now() where id = $1 and status = 'open'", [id]);
+    return { ok: true };
+  });
+
+  app.post("/stock-counts/:id/cancel", async (request) => {
+    const { id } = idParam.parse(request.params);
+    await pool.query("update stock_counts set status = 'cancelled' where id = $1 and status in ('open','submitted')", [id]);
+    return { ok: true };
+  });
+
+  app.post("/stock-counts/:id/close", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const userId = actorId(request);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const count = await client.query(`
+        select sc.*, l.type as "locationType"
+        from stock_counts sc join stock_locations l on l.id = sc.location_id
+        where sc.id = $1 for update
+      `, [id]);
+      if (!count.rows[0]) throw app.httpErrors.notFound("Stock count not found");
+      if (!["open", "submitted"].includes(String(count.rows[0].status))) throw app.httpErrors.badRequest("Stock count is already closed or cancelled.");
+      const lines = await client.query("select * from stock_count_lines where stock_count_id = $1 and counted_qty is not null", [id]);
+      for (const line of lines.rows) {
+        const variance = numberify(line.variance_qty);
+        if (variance === 0) continue;
+        const direction = variance > 0 ? "in" : "out";
+        const qty = Math.abs(variance);
+        if (line.item_id) {
+          await updateWarehouseItem(client, String(line.item_id), variance);
+          const item = await client.query("select average_cost from items where id = $1", [line.item_id]);
+          await client.query(
+            `insert into stock_movements (location_id, item_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+             values ($1,$2,$3,$4,$5,'stock_count',$6,$7,'Stock count variance')`,
+            [count.rows[0].location_id, line.item_id, direction, qty, numberify(item.rows[0]?.average_cost), id, userId]
+          );
+        } else if (line.product_id) {
+          if (count.rows[0].locationType === "shop") await updateShopProduct(client, String(line.product_id), variance);
+          else await updateWarehouseProduct(client, String(line.product_id), variance);
+          const product = await client.query("select average_cost from products where id = $1", [line.product_id]);
+          await client.query(
+            `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+             values ($1,$2,$3,$4,$5,'stock_count',$6,$7,'Stock count variance')`,
+            [count.rows[0].location_id, line.product_id, direction, qty, numberify(product.rows[0]?.average_cost), id, userId]
+          );
+        }
+      }
+      await client.query("update stock_counts set status = 'closed', approved_by = $2, closed_at = now() where id = $1", [id, userId]);
+      await client.query("commit");
+      return { ok: true };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.post("/transfers", async (request, reply) => {
+    const body = transferSchema.parse(request.body);
+    const userId = actorId(request);
+    const warehouseId = await defaultLocation("warehouse");
+    const shopId = await defaultLocation("shop");
+    const transfer = await pool.query(
+      `insert into stock_transfers (ref_no, from_location_id, to_location_id, product_id, quantity, transferred_by, note, status)
+       values ($1,$2,$3,$4,$5,$6,$7,'draft') returning id, ref_no`,
+      [ref("TR"), warehouseId, shopId, body.productId, body.quantity, userId, body.note ?? null]
+    );
+    return reply.code(201).send({ id: transfer.rows[0].id, refNo: transfer.rows[0].ref_no });
+  });
+
   app.get("/transfers", async () => {
     const result = await pool.query(`
       select t.id, t.ref_no as "refNo", t.from_location_id as "fromOutletId", t.to_location_id as "toOutletId",
              fl.name as "fromOutletName", tl.name as "toOutletName", p.name as "productName",
              t.quantity as "totalItems", t.transferred_at as "createdAt", t.note, u.full_name as "userName",
-             'received'::text as status
+             t.status::text as status
       from stock_transfers t
       join products p on p.id = t.product_id
       join stock_locations fl on fl.id = t.from_location_id
@@ -1393,8 +1914,83 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     return result.rows.map((row) => ({ ...row, totalItems: numberify(row.totalItems) }));
   });
 
+  async function changeTransferStatus(id: string, userId: string | null, action: "send" | "receive" | "cancel") {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const transfer = await client.query("select * from stock_transfers where id = $1 for update", [id]);
+      const row = transfer.rows[0];
+      if (!row) throw app.httpErrors.notFound("Transfer not found");
+      const status = String(row.status);
+      const quantity = numberify(row.quantity);
+      const productId = String(row.product_id);
+      const product = await client.query("select average_cost from products where id = $1", [productId]);
+      const unitCost = numberify(product.rows[0]?.average_cost);
+
+      if (action === "send") {
+        if (status !== "draft") throw app.httpErrors.badRequest("Only draft transfers can be sent.");
+        await assertWarehouseProduct(client, productId, quantity);
+        await updateWarehouseProduct(client, productId, -quantity);
+        await client.query(
+          `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+           values ($1,$2,'out',$3,$4,'transfer',$5,$6,'Transfer sent from warehouse')`,
+          [row.from_location_id, productId, quantity, unitCost, id, userId]
+        );
+        await client.query("update stock_transfers set status = 'sent', sent_at = now(), transferred_by = coalesce($2, transferred_by) where id = $1", [id, userId]);
+      }
+
+      if (action === "receive") {
+        if (status !== "sent") throw app.httpErrors.badRequest("Only sent transfers can be received.");
+        await updateShopProduct(client, productId, quantity);
+        await client.query(
+          `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+           values ($1,$2,'in',$3,$4,'transfer',$5,$6,'Transfer received into shop')`,
+          [row.to_location_id, productId, quantity, unitCost, id, userId]
+        );
+        await client.query("update stock_transfers set status = 'received', received_at = now() where id = $1", [id]);
+      }
+
+      if (action === "cancel") {
+        if (!["draft", "sent"].includes(status)) throw app.httpErrors.badRequest("Only draft or sent transfers can be cancelled.");
+        if (status === "sent") {
+          await updateWarehouseProduct(client, productId, quantity);
+          await client.query(
+            `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+             values ($1,$2,'in',$3,$4,'transfer',$5,$6,'Transfer cancelled back to warehouse')`,
+            [row.from_location_id, productId, quantity, unitCost, id, userId]
+          );
+        }
+        await client.query("update stock_transfers set status = 'cancelled', cancelled_at = now() where id = $1", [id]);
+      }
+
+      await client.query("commit");
+      return { ok: true };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  app.post("/transfers/:id/send", async (request) => {
+    const { id } = idParam.parse(request.params);
+    return changeTransferStatus(id, actorId(request), "send");
+  });
+
+  app.post("/transfers/:id/receive", async (request) => {
+    const { id } = idParam.parse(request.params);
+    return changeTransferStatus(id, actorId(request), "receive");
+  });
+
+  app.post("/transfers/:id/cancel", async (request) => {
+    const { id } = idParam.parse(request.params);
+    return changeTransferStatus(id, actorId(request), "cancel");
+  });
+
   app.post("/sales", async (request, reply) => {
     const body = saleSchema.parse(request.body);
+    const userId = actorId(request);
     const shopId = await defaultLocation("shop");
     const client = await pool.connect();
     try {
@@ -1408,10 +2004,22 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         cogs += line.quantity * numberify(product.rows[0]?.average_cost);
       }
       const total = Math.max(0, subtotal - body.discount);
+      if (body.paymentMethod === "credit") {
+        if (!body.customerId) throw app.httpErrors.badRequest("Credit sales require a customer.");
+        const credit = await client.query(`
+          select c.credit_limit, greatest(0, coalesce(sum(s.total), 0) - coalesce((select sum(p.amount) from payments p where p.customer_id = c.id), 0)) as balance
+          from customers c
+          left join sales s on s.customer_id = c.id and s.payment_method = 'credit' and s.status <> 'void'
+          where c.id = $1
+          group by c.id
+        `, [body.customerId]);
+        const remaining = numberify(credit.rows[0]?.credit_limit) - numberify(credit.rows[0]?.balance);
+        if (remaining < total) throw app.httpErrors.badRequest(`Customer credit limit exceeded. Available credit: ${formatMoney(remaining)}`);
+      }
       const sale = await client.query(
         `insert into sales (ref_no, customer_id, cashier_id, subtotal, discount, total, payment_method)
          values ($1,$2,$3,$4,$5,$6,$7) returning id, ref_no`,
-        [ref("SL"), body.customerId ?? null, body.cashierId, subtotal, body.discount, total, body.paymentMethod]
+        [ref("SL"), body.customerId ?? null, userId, subtotal, body.discount, total, body.paymentMethod]
       );
       const receiptItems: Record<string, unknown>[] = [];
       for (const line of body.items) {
@@ -1436,7 +2044,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         await client.query(
           `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
            values ($1,$2,'out',$3,$4,'sale',$5,$6,'POS sale')`,
-          [shopId, line.productId, line.quantity, unitCost, sale.rows[0].id, body.cashierId]
+          [shopId, line.productId, line.quantity, unitCost, sale.rows[0].id, userId]
         );
       }
       if (body.paymentMethod !== "credit") {
@@ -1517,6 +2125,145 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     return { ...row, total: money(row.total) };
   });
 
+  app.get("/returns", async () => {
+    const result = await pool.query(`
+      select r.id, r.ref_no as "refNo", r.sale_id as "saleId", s.ref_no as "saleRefNo",
+             c.name as "customerName", r.reason, r.refund_method as "refundMethod",
+             r.subtotal, r.total, r.status, r.created_at as "createdAt",
+             coalesce(count(ri.id), 0) as "lineCount"
+      from returns r
+      join sales s on s.id = r.sale_id
+      left join customers c on c.id = r.customer_id
+      left join return_items ri on ri.return_id = r.id
+      group by r.id, s.ref_no, c.name
+      order by r.created_at desc
+      limit 100
+    `);
+    return result.rows.map((row) => ({ ...row, subtotal: money(row.subtotal), total: money(row.total), lineCount: Number(row.lineCount) }));
+  });
+
+  app.post("/returns", async (request, reply) => {
+    const body = returnSchema.parse(request.body);
+    const userId = actorId(request);
+    const shopId = await defaultLocation("shop");
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const sale = await client.query("select * from sales where id = $1 for update", [body.saleId]);
+      const saleRow = sale.rows[0];
+      if (!saleRow) throw app.httpErrors.notFound("Sale not found");
+      if (String(saleRow.status) === "void") throw app.httpErrors.badRequest("Voided sales cannot be returned.");
+
+      const createdReturn = await client.query(
+        `insert into returns (ref_no, sale_id, customer_id, cashier_id, reason, refund_method)
+         values ($1,$2,$3,$4,$5,$6) returning id, ref_no`,
+        [ref("RET"), body.saleId, saleRow.customer_id ?? null, userId, body.reason, body.refundMethod]
+      );
+      const returnId = createdReturn.rows[0].id as string;
+      let subtotal = 0;
+      let cogs = 0;
+
+      for (const line of body.items) {
+        const saleItem = await client.query(
+          `select si.*, coalesce(sum(ri.quantity), 0) as returned_qty
+           from sale_items si
+           left join return_items ri on ri.sale_item_id = si.id
+           where si.sale_id = $1 and ($2::uuid is null or si.id = $2) and si.product_id = $3
+           group by si.id
+           order by si.id
+           limit 1`,
+          [body.saleId, line.saleItemId ?? null, line.productId]
+        );
+        const item = saleItem.rows[0];
+        if (!item) throw app.httpErrors.badRequest("Return item does not belong to this sale.");
+        const remaining = numberify(item.quantity) - numberify(item.returned_qty);
+        if (line.quantity > remaining) throw app.httpErrors.badRequest(`Return quantity is greater than sold quantity. Remaining: ${remaining}`);
+        const lineTotal = line.quantity * numberify(item.unit_price);
+        const lineCost = line.quantity * numberify(item.unit_cost);
+        subtotal += lineTotal;
+        cogs += lineCost;
+        await client.query(
+          `insert into return_items (return_id, sale_item_id, product_id, quantity, unit_price, unit_cost, line_total)
+           values ($1,$2,$3,$4,$5,$6,$7)`,
+          [returnId, item.id, line.productId, line.quantity, item.unit_price, item.unit_cost, lineTotal]
+        );
+        await updateShopProduct(client, line.productId, line.quantity);
+        await client.query(
+          `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+           values ($1,$2,'in',$3,$4,'return',$5,$6,$7)`,
+          [shopId, line.productId, line.quantity, numberify(item.unit_cost), returnId, userId, body.reason]
+        );
+      }
+
+      await client.query("update returns set subtotal = $2, total = $3 where id = $1", [returnId, subtotal, subtotal]);
+      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','return',$1,$2,$3)", [returnId, -subtotal, "Sale return"]);
+      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','return',$1,$2,$3)", [returnId, -cogs, "COGS reversal"]);
+
+      const totals = await client.query(`
+        select coalesce(sum(si.quantity), 0) as sold, coalesce((select sum(ri.quantity) from return_items ri join sale_items x on x.id = ri.sale_item_id where x.sale_id = $1), 0) as returned
+        from sale_items si where si.sale_id = $1
+      `, [body.saleId]);
+      if (numberify(totals.rows[0]?.returned) >= numberify(totals.rows[0]?.sold)) {
+        await client.query("update sales set status = 'returned' where id = $1", [body.saleId]);
+      }
+
+      await client.query("commit");
+      return reply.code(201).send({ id: returnId, refNo: createdReturn.rows[0].ref_no });
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.post("/sales/:id/void", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const body = z.object({ reason: z.string().trim().min(1).default("Voided sale") }).parse(request.body ?? {});
+    const userId = actorId(request);
+    const shopId = await defaultLocation("shop");
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const sale = await client.query("select * from sales where id = $1 for update", [id]);
+      const saleRow = sale.rows[0];
+      if (!saleRow) throw app.httpErrors.notFound("Sale not found");
+      if (String(saleRow.status) === "void") throw app.httpErrors.badRequest("Sale is already void.");
+      if (String(saleRow.status) === "returned") throw app.httpErrors.badRequest("Returned sales cannot be voided.");
+      const lines = await client.query(`
+        select si.*, coalesce(sum(ri.quantity), 0) as returned_qty
+        from sale_items si
+        left join return_items ri on ri.sale_item_id = si.id
+        where si.sale_id = $1
+        group by si.id
+      `, [id]);
+      let revenue = 0;
+      let cogs = 0;
+      for (const line of lines.rows) {
+        const qty = numberify(line.quantity) - numberify(line.returned_qty);
+        if (qty <= 0) continue;
+        revenue += qty * numberify(line.unit_price) - numberify(line.discount);
+        cogs += qty * numberify(line.unit_cost);
+        await updateShopProduct(client, String(line.product_id), qty);
+        await client.query(
+          `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+           values ($1,$2,'in',$3,$4,'sale_void',$5,$6,$7)`,
+          [shopId, line.product_id, qty, numberify(line.unit_cost), id, userId, body.reason]
+        );
+      }
+      await client.query("update sales set status = 'void' where id = $1", [id]);
+      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale_void',$1,$2,$3)", [id, -revenue, body.reason]);
+      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale_void',$1,$2,$3)", [id, -cogs, "COGS reversal"]);
+      await client.query("commit");
+      return { ok: true };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
   app.get("/customers", async () => {
     const result = await pool.query(`
       select c.*, coalesce(sum(s.total), 0) as "totalPurchases", coalesce(count(distinct s.id), 0) as "saleCount",
@@ -1531,7 +2278,10 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.post("/customers", async (request, reply) => {
     const body = customerSchema.parse(request.body);
-    const result = await pool.query("insert into customers (name, phone, email, address) values ($1,$2,$3,$4) returning id", [body.name, body.phone ?? null, body.email ?? null, body.address ?? null]);
+    const result = await pool.query(
+      "insert into customers (name, phone, email, address, credit_limit, loyalty_points) values ($1,$2,$3,$4,$5,$6) returning id",
+      [body.name, body.phone ?? null, body.email ?? null, body.address ?? null, body.creditLimit ?? 0, body.loyaltyPoints ?? 0]
+    );
     return reply.code(201).send({ id: result.rows[0].id });
   });
 
@@ -1540,9 +2290,11 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     const body = customerSchema.partial().extend({ status: z.enum(["active", "suspended", "disabled"]).optional() }).parse(request.body);
     await pool.query(
       `update customers set name = coalesce($2, name), phone = coalesce($3, phone), email = coalesce($4, email),
-       address = coalesce($5, address), status = coalesce($6::user_status, status), updated_at = now()
+       address = coalesce($5, address), status = coalesce($6::user_status, status),
+       credit_limit = coalesce($7, credit_limit), loyalty_points = coalesce($8, loyalty_points),
+       updated_at = now()
        where id = $1`,
-      [id, body.name ?? null, body.phone ?? null, body.email ?? null, body.address ?? null, body.status ?? null]
+      [id, body.name ?? null, body.phone ?? null, body.email ?? null, body.address ?? null, body.status ?? null, body.creditLimit ?? null, body.loyaltyPoints ?? null]
     );
     return { ok: true };
   });
@@ -1624,6 +2376,43 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     return result.rows.map((row) => ({ ...row, amount: money(row.amount), recurring: false }));
   });
 
+  app.post("/expenses", async (request, reply) => {
+    const body = expenseSchema.parse(request.body ?? {});
+    const result = await pool.query(
+      `insert into expenses (supplier_invoice_id, category, description, amount, expense_date, status)
+       values ($1,$2,$3,$4,coalesce($5::date, current_date),$6::document_status)
+       returning id`,
+      [body.supplierInvoiceId ?? null, body.category, body.description ?? null, body.amount, body.expenseDate ?? null, body.status]
+    );
+    await pool.query(
+      "insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('purchase_expense','expense',$1,$2,$3)",
+      [result.rows[0].id, body.amount, body.description ?? body.category]
+    );
+    return reply.code(201).send({ id: result.rows[0].id });
+  });
+
+  app.get("/loyalty", async () => {
+    const result = await pool.query(`
+      select id, name, loyalty_points as "loyaltyPoints"
+      from customers
+      order by loyalty_points desc, name
+      limit 200
+    `);
+    return result.rows;
+  });
+
+  app.get("/credit", async () => {
+    const result = await pool.query(`
+      select c.id, c.name, c.credit_limit as "creditLimit",
+             greatest(0, coalesce(sum(s.total), 0) - coalesce((select sum(p.amount) from payments p where p.customer_id = c.id), 0)) as balance
+      from customers c
+      left join sales s on s.customer_id = c.id and s.payment_method = 'credit'
+      group by c.id
+      order by balance desc, c.name
+    `);
+    return result.rows.map((row) => ({ ...row, creditLimit: money(row.creditLimit), balance: money(row.balance) }));
+  });
+
   app.get("/reports", async () => {
     const [finance, topProducts, stockMoves] = await Promise.all([
       pool.query("select type, coalesce(sum(amount), 0) as amount from finance_transactions group by type order by type"),
@@ -1633,15 +2422,68 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     return { finance: finance.rows, topProducts: topProducts.rows, stockMovements: stockMoves.rows };
   });
 
+  app.get("/audit", async (request) => {
+    const query = request.query as { entity?: string; action?: string; userId?: string; limit?: string };
+    const limit = Math.min(500, Math.max(1, Number(query.limit ?? 200)));
+    const result = await pool.query(
+      `select a.id, a.ts, a.user_id as "userId", u.full_name as "userName", a.action, a.entity,
+              a.entity_id as "entityId", a.detail::text as detail, a.device_id as "deviceId", a.ip
+       from audit_log a
+       left join users u on u.id = a.user_id
+       where ($1::text is null or a.entity = $1)
+         and ($2::text is null or a.action = $2)
+         and ($3::uuid is null or a.user_id = $3)
+       order by a.ts desc
+       limit $4`,
+      [query.entity ?? null, query.action ?? null, query.userId ?? null, limit]
+    );
+    return result.rows;
+  });
+
   app.get("/users", async () => (await pool.query("select id, username, email, full_name as name, role, status, last_login_at as \"lastLoginAt\" from users order by created_at desc")).rows);
 
-  app.get("/roles", async () => [
+  const roleDetails = [
     { id: "super_admin", label: "Administrator", permissions: [{ id: "all", label: "Full system access" }] },
     { id: "inventory_officer", label: "Inventory officer", permissions: [{ id: "inventory", label: "Inventory" }, { id: "purchasing", label: "Purchasing" }, { id: "transfers", label: "Transfers" }] },
     { id: "production_officer", label: "Production officer", permissions: [{ id: "blueprints", label: "Product blueprints" }, { id: "production", label: "Production" }, { id: "warehouse", label: "Warehouse stock" }] },
     { id: "pos_cashier", label: "POS cashier", permissions: [{ id: "pos", label: "POS sales" }, { id: "receipts", label: "Receipts" }, { id: "customers", label: "Customers" }] },
     { id: "finance_user", label: "Finance user", permissions: [{ id: "finance", label: "Finance" }, { id: "reports", label: "Reports" }, { id: "supplier_invoices", label: "Supplier invoices" }] }
-  ]);
+  ];
+
+  app.get("/roles", async () => roleDetails);
+
+  app.get("/permissions", async () => {
+    const permissions = new Map<string, { id: string; label: string; roles: string[] }>();
+    for (const role of roleDetails) {
+      for (const permission of role.permissions) {
+        const current = permissions.get(permission.id) ?? { ...permission, roles: [] };
+        current.roles.push(role.id);
+        permissions.set(permission.id, current);
+      }
+    }
+    return [...permissions.values()].sort((a, b) => a.id.localeCompare(b.id));
+  });
+
+  app.get("/sessions", async () => {
+    const result = await pool.query(`
+      select s.id, s.user_id as "userId", u.full_name as "userName", u.email, s.device_id as "deviceId",
+             s.user_agent as "userAgent", s.ip, s.created_at as "createdAt", s.expires_at as "expiresAt",
+             s.revoked_at as "revokedAt",
+             (s.revoked_at is null and s.expires_at > now()) as active
+      from sessions s
+      join users u on u.id = s.user_id
+      order by s.created_at desc
+      limit 200
+    `);
+    return result.rows;
+  });
+
+  app.post("/sessions/:id/revoke", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const result = await pool.query("update sessions set revoked_at = now() where id = $1 and revoked_at is null returning id", [id]);
+    if (!result.rowCount) throw app.httpErrors.notFound("Session not found or already revoked");
+    return { ok: true };
+  });
 
   app.post("/users", async (request, reply) => {
     const body = userSchema.parse(request.body);

@@ -6,21 +6,61 @@ import { config } from "./config.js";
 
 const mode = process.argv[2];
 const root = join(process.cwd(), "..", "..", "db", "postgres");
+const migrations = [
+  "001_init.sql",
+  "002_srs_completion.sql",
+  "003_app_branding.sql",
+  "004_admin_completion.sql",
+  "005_people_workflows.sql",
+  "006_core_reset.sql",
+  "007_grn_receiving_flow.sql",
+  "008_item_images_payment_pop.sql",
+  "009_v1_foundation_gaps.sql"
+];
 
 async function runSql(path: string) {
   const sql = await readFile(path, "utf8");
   await pool.query(sql);
 }
 
+async function ensureMigrationTable() {
+  await pool.query(`
+    create table if not exists schema_migrations (
+      version text primary key,
+      applied_at timestamptz not null default now()
+    )
+  `);
+}
+
+async function markApplied(version: string) {
+  await pool.query("insert into schema_migrations (version) values ($1) on conflict (version) do nothing", [version]);
+}
+
+async function hasTable(name: string) {
+  const result = await pool.query("select to_regclass($1) as table_name", [`public.${name}`]);
+  return Boolean(result.rows[0]?.table_name);
+}
+
 async function runMigrations() {
-  await runSql(join(root, "migrations", "001_init.sql"));
-  await runSql(join(root, "migrations", "002_srs_completion.sql"));
-  await runSql(join(root, "migrations", "003_app_branding.sql"));
-  await runSql(join(root, "migrations", "004_admin_completion.sql"));
-  await runSql(join(root, "migrations", "005_people_workflows.sql"));
-  await runSql(join(root, "migrations", "006_core_reset.sql"));
-  await runSql(join(root, "migrations", "007_grn_receiving_flow.sql"));
-  await runSql(join(root, "migrations", "008_item_images_payment_pop.sql"));
+  await ensureMigrationTable();
+
+  const applied = await pool.query("select version from schema_migrations");
+  const appliedVersions = new Set(applied.rows.map((row) => String(row.version)));
+
+  if (appliedVersions.size === 0 && await hasTable("users")) {
+    for (const version of migrations.slice(0, 6)) {
+      await markApplied(version);
+      appliedVersions.add(version);
+    }
+    console.log("Existing Blex schema detected; marked destructive legacy migrations as applied.");
+  }
+
+  for (const version of migrations) {
+    if (appliedVersions.has(version)) continue;
+    await runSql(join(root, "migrations", version));
+    await markApplied(version);
+    console.log(`Applied ${version}`);
+  }
 }
 
 function getDatabaseParts() {
@@ -31,6 +71,17 @@ function getDatabaseParts() {
   }
   url.pathname = "/postgres";
   return { database, maintenanceUrl: url.toString() };
+}
+
+function redactedDatabaseUrl() {
+  try {
+    const url = new URL(config.databaseUrl);
+    if (url.password) url.password = "****";
+    if (url.username) url.username = "****";
+    return url.toString();
+  } catch {
+    return "[invalid DATABASE_URL]";
+  }
 }
 
 async function createDatabaseIfMissing() {
@@ -74,7 +125,7 @@ try {
   const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
   if (code === "ECONNREFUSED") {
     console.error("\nPostgreSQL is not reachable.");
-    console.error(`Tried DATABASE_URL=${config.databaseUrl}`);
+    console.error(`Tried DATABASE_URL=${redactedDatabaseUrl()}`);
     console.error("\nStart PostgreSQL first, then rerun:");
     console.error("  npm run db:check");
     console.error("  npm run db:migrate");

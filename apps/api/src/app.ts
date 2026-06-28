@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import sensible from "@fastify/sensible";
 import Fastify from "fastify";
+import { installAuditTrail, installCoreAuthentication } from "./authz.js";
 import { config } from "./config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCoreRoutes } from "./routes/core.js";
@@ -20,6 +21,8 @@ export async function createApp() {
   app.get("/health", async () => ({ ok: true, service: "blex-api" }));
 
   await registerAuthRoutes(app);
+  installCoreAuthentication(app);
+  installAuditTrail(app);
   await registerCoreRoutes(app);
 
   app.setErrorHandler((error, request, reply) => {

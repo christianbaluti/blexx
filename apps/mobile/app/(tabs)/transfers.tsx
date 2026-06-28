@@ -32,6 +32,19 @@ export default function Transfers() {
     }
   });
 
+  const transition = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: "send" | "receive" | "cancel" }) => (
+      action === "send" ? api.sendTransfer(id) : action === "receive" ? api.receiveTransfer(id) : api.cancelTransfer(id)
+    ),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["transfers"] }),
+        queryClient.invalidateQueries({ queryKey: ["inventory"] }),
+        queryClient.invalidateQueries({ queryKey: ["products"] })
+      ]);
+    }
+  });
+
   function openNew() {
     setProductId(products[0]?.id ?? "");
     setQty("");
@@ -59,8 +72,24 @@ export default function Transfers() {
                 <View style={styles.cell}><Badge tone={transfer.status === "received" ? "success" : "warning"}>{transfer.status}</Badge></View>
                 <Text style={styles.rightCell}>{transfer.totalItems}</Text>
                 <Text style={styles.mutedText}>{new Date(transfer.createdAt).toLocaleString()}</Text>
-                <View style={styles.cell}>
-                  <MaterialCommunityIcons name="check-circle-outline" size={18} color={colors.success} />
+                <View style={styles.actionCell}>
+                  {transfer.status === "draft" ? (
+                    <Pressable style={styles.smallAction} onPress={() => transition.mutate({ id: transfer.id, action: "send" })} disabled={transition.isPending}>
+                      <Text style={styles.smallActionText}>Send</Text>
+                    </Pressable>
+                  ) : null}
+                  {transfer.status === "sent" ? (
+                    <Pressable style={styles.smallAction} onPress={() => transition.mutate({ id: transfer.id, action: "receive" })} disabled={transition.isPending}>
+                      <Text style={styles.smallActionText}>Receive</Text>
+                    </Pressable>
+                  ) : null}
+                  {["draft", "sent"].includes(transfer.status) ? (
+                    <Pressable style={[styles.smallAction, styles.cancelAction]} onPress={() => transition.mutate({ id: transfer.id, action: "cancel" })} disabled={transition.isPending}>
+                      <Text style={[styles.smallActionText, styles.cancelActionText]}>Cancel</Text>
+                    </Pressable>
+                  ) : (
+                    <MaterialCommunityIcons name="check-circle-outline" size={18} color={transfer.status === "received" ? colors.success : colors.muted} />
+                  )}
                 </View>
               </View>
             ))}
@@ -84,7 +113,7 @@ export default function Transfers() {
             {create.error ? <Text style={styles.error}>{create.error instanceof Error ? create.error.message : "Transfer failed"}</Text> : null}
             <View style={styles.actions}>
               <Button variant="outline" onPress={() => setOpen(false)}>Cancel</Button>
-              <Button onPress={() => create.mutate()} disabled={!productId || !Number(qty) || create.isPending}>Move to shop</Button>
+              <Button onPress={() => create.mutate()} disabled={!productId || !Number(qty) || create.isPending}>Create draft</Button>
             </View>
           </Pressable>
         </Pressable>
@@ -118,8 +147,11 @@ const styles = StyleSheet.create({
   cellText: { flex: 1, minWidth: 130, color: colors.ink, fontWeight: "800" },
   mutedText: { flex: 1, minWidth: 140, color: colors.muted, fontSize: 12 },
   rightCell: { flex: 1, minWidth: 80, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
-  receiveButton: { minHeight: 32, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, borderRadius: 7, backgroundColor: colors.accent, paddingHorizontal: 10 },
-  receiveText: { color: "#FFF7EF", fontSize: 12, fontWeight: "900" },
+  actionCell: { flex: 1.2, minWidth: 190, flexDirection: "row", alignItems: "center", gap: 8 },
+  smallAction: { minHeight: 32, alignItems: "center", justifyContent: "center", borderRadius: 7, backgroundColor: colors.accent, paddingHorizontal: 10 },
+  smallActionText: { color: "#FFF7EF", fontSize: 12, fontWeight: "900" },
+  cancelAction: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+  cancelActionText: { color: colors.ink },
   backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },
   panel: { width: "100%", maxWidth: 560, gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },
   modalTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 23, fontWeight: "700" },
