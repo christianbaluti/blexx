@@ -9,7 +9,7 @@ import { registerCoreRoutes } from "./routes/core.js";
 export async function createApp() {
   const app = Fastify({
     logger: true,
-    bodyLimit: 2 * 1024 * 1024
+    bodyLimit: 8 * 1024 * 1024
   });
 
   await app.register(cors, { origin: true, credentials: true });
@@ -24,7 +24,21 @@ export async function createApp() {
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error(error);
-    const handled = error as Error & { statusCode?: number };
+    const handled = error as Error & { code?: string; statusCode?: number };
+    if (handled.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+      reply.status(413).send({
+        error: handled.code,
+        message: "The attached file is too large. Please choose a file up to 5 MB."
+      });
+      return;
+    }
+    if (handled.name === "ZodError") {
+      reply.status(400).send({
+        error: handled.name,
+        message: handled.message.includes("5 MB") ? "The attached file is too large. Please choose a file up to 5 MB." : "Please check the form fields and try again."
+      });
+      return;
+    }
     const statusCode = handled.statusCode ?? 500;
     reply.status(statusCode).send({
       error: handled.name,

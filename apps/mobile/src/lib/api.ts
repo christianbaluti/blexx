@@ -170,7 +170,23 @@ export const api = {
       shopStock: Number(row.shopStock ?? 0)
     } as Product & { warehouseStock: number; shopStock: number }));
   },
-  items: () => cached<Record<string, unknown>[]>("items", "/items", []),
+  async items() {
+    const rows = await cached<Record<string, unknown>[]>("items", "/items", []);
+    return rows.map((row) => ({
+      ...row,
+      id: String(row.id),
+      sku: String(row.sku ?? ""),
+      name: String(row.name ?? ""),
+      unit: String(row.unit ?? "ea"),
+      stock: Number(row.stock ?? 0),
+      shopStock: Number(row.shopStock ?? row.shop_stock ?? 0),
+      averageCost: Number(row.averageCost ?? row.average_cost ?? 0),
+      reorderLevel: Number(row.reorderLevel ?? row.reorder_level ?? 0),
+      imageData: row.imageData || row.image_data ? String(row.imageData ?? row.image_data) : null,
+      imageMime: row.imageMime || row.image_mime ? String(row.imageMime ?? row.image_mime) : null,
+      status: String(row.status ?? "active")
+    }));
+  },
   categories: async () => [] as Category[],
   suppliers: () => cached<Supplier[]>("suppliers", "/suppliers", []),
   async customers() {
@@ -414,7 +430,21 @@ export const api = {
     return request<{ id: string }>("/items", { method: "POST", body: JSON.stringify(payload) });
   },
   updateProduct(id: string, payload: Record<string, unknown>) {
-    return request<{ ok: boolean }>(`/products/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+    return request<{ ok: boolean }>(`/products/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        sku: payload.sku,
+        barcode: payload.barcode,
+        name: payload.name,
+        unit: payload.unit,
+        sellingPrice: payload.price ?? payload.sellingPrice,
+        reorderLevel: payload.reorder ?? payload.reorderLevel,
+        imageData: payload.imageUrl ?? payload.imageData
+      })
+    });
+  },
+  updateItem(id: string, payload: Record<string, unknown>) {
+    return request<{ ok: boolean }>(`/items/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
   },
   deleteProduct(id: string) {
     return request<{ ok: boolean }>(`/products/${id}`, { method: "DELETE" });

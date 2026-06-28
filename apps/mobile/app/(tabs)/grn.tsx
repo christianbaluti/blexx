@@ -7,9 +7,9 @@ import { Badge, CommandButton, EmptyPanel, MetricCard, PageHeader, TableCard, Ta
 import { ExportMenu } from "../../src/components/export-menu";
 import { Button, Card, Field, Screen } from "../../src/components/ui";
 import { AttachmentPicker } from "../../src/components/attachment-picker";
+import { AttachmentActions } from "../../src/components/attachment-actions";
 import { DatePickerField } from "../../src/components/date-picker-field";
 import { api } from "../../src/lib/api";
-import { openDataAttachment } from "../../src/lib/attachments";
 import { colors, typography } from "../../src/lib/theme";
 
 type ReceiveMode = "po" | "direct";
@@ -416,11 +416,16 @@ function GrnDetail({ data, loading, onBack }: { data: Record<string, unknown> | 
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text style={styles.poLineName}>{String(invoice.refNo ?? "-")}</Text>
                       <Text style={styles.poLineMeta}>Due {String(invoice.dueDate ?? "-")} | {formatMwk(Number(invoice.total ?? 0))}</Text>
-                      <Text style={styles.poLineMeta}>Attachment: {String(invoice.attachmentName ?? "No file attached")}</Text>
                     </View>
                     <View style={styles.invoiceActions}>
                       <Badge tone={String(invoice.status) === "paid" ? "success" : "warning"}>{String(invoice.status ?? "open")}</Badge>
-                      {invoice.attachmentData ? <CommandButton icon="file-eye-outline" label="Open file" onPress={() => openDataAttachment(String(invoice.attachmentName ?? "invoice"), String(invoice.attachmentData), String(invoice.attachmentMime ?? ""))} /> : null}
+                    </View>
+                    <View style={styles.invoiceAttachment}>
+                      <AttachmentActions
+                        name={invoice.attachmentName ? String(invoice.attachmentName) : null}
+                        mime={invoice.attachmentMime ? String(invoice.attachmentMime) : null}
+                        data={invoice.attachmentData ? String(invoice.attachmentData) : null}
+                      />
                     </View>
                   </View>
                 ))}
@@ -545,8 +550,9 @@ const styles = StyleSheet.create({
   checkRow: { minHeight: 46, flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, borderColor: colors.line, borderRadius: 8, paddingHorizontal: 10 },
   checkText: { color: colors.ink, fontWeight: "800", flex: 1 },
   invoiceBox: { gap: 12, padding: 12 },
-  invoiceLine: { flexDirection: "row", alignItems: "flex-start", gap: 10, borderWidth: 1, borderColor: colors.line, borderRadius: 7, padding: 10 },
+  invoiceLine: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 10, borderWidth: 1, borderColor: colors.line, borderRadius: 7, padding: 10 },
   invoiceActions: { alignItems: "flex-end", gap: 8 },
+  invoiceAttachment: { width: "100%", minWidth: 240 },
   totalStrip: { flexDirection: "row", flexWrap: "wrap", gap: 8, borderTopWidth: 1, borderTopColor: colors.line, paddingTop: 10 },
   totalLabel: { color: colors.muted, fontWeight: "800" },
   totalStrong: { color: colors.accent, fontWeight: "900" },

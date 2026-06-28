@@ -5,12 +5,12 @@ import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressa
 import type { GoodsReceivedNote, Supplier, SupplierInvoice } from "@blex/shared";
 import { formatMwk } from "@blex/shared";
 import { AttachmentPicker } from "../../src/components/attachment-picker";
+import { AttachmentActions } from "../../src/components/attachment-actions";
 import { DatePickerField } from "../../src/components/date-picker-field";
 import { Badge, CommandButton, EmptyPanel, MetricCard, PageHeader, TableCard, TableHeader } from "../../src/components/feature-ui";
 import { ExportMenu } from "../../src/components/export-menu";
 import { Button, Card, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
-import { openDataAttachment } from "../../src/lib/attachments";
 import { colors, typography } from "../../src/lib/theme";
 
 type InvoiceForm = {
@@ -22,11 +22,40 @@ type InvoiceForm = {
   attachmentName: string;
   attachmentMime: string;
   attachmentData: string;
+  paymentMethod: "cash" | "card" | "mobile" | "bank" | "credit";
+  paymentReference: string;
+  paymentNote: string;
+  paymentAttachmentName: string;
+  paymentAttachmentMime: string;
+  paymentAttachmentData: string;
 };
-type PaymentForm = { amount: string; method: "cash" | "card" | "mobile" | "bank" | "credit"; reference: string; note: string };
+type PaymentForm = {
+  amount: string;
+  method: "cash" | "card" | "mobile" | "bank" | "credit";
+  reference: string;
+  note: string;
+  attachmentName: string;
+  attachmentMime: string;
+  attachmentData: string;
+};
 
-const emptyForm: InvoiceForm = { supplierId: "", dueDate: "", total: "0", paid: "0", grnId: "", attachmentName: "", attachmentMime: "", attachmentData: "" };
-const emptyPayment: PaymentForm = { amount: "", method: "bank", reference: "", note: "" };
+const emptyForm: InvoiceForm = {
+  supplierId: "",
+  dueDate: "",
+  total: "0",
+  paid: "0",
+  grnId: "",
+  attachmentName: "",
+  attachmentMime: "",
+  attachmentData: "",
+  paymentMethod: "bank",
+  paymentReference: "",
+  paymentNote: "",
+  paymentAttachmentName: "",
+  paymentAttachmentMime: "",
+  paymentAttachmentData: ""
+};
+const emptyPayment: PaymentForm = { amount: "", method: "bank", reference: "", note: "", attachmentName: "", attachmentMime: "", attachmentData: "" };
 
 function numeric(value: string) {
   return Number(value || 0);
@@ -80,7 +109,13 @@ export default function SupplierInvoices() {
         grnId: form.grnId || null,
         attachmentName: form.attachmentName || null,
         attachmentMime: form.attachmentMime || null,
-        attachmentData: form.attachmentData || null
+        attachmentData: form.attachmentData || null,
+        paymentMethod: form.paymentMethod,
+        paymentReference: form.paymentReference || null,
+        paymentNote: form.paymentNote || null,
+        paymentAttachmentName: form.paymentAttachmentName || null,
+        paymentAttachmentMime: form.paymentAttachmentMime || null,
+        paymentAttachmentData: form.paymentAttachmentData || null
       };
       if (editing) {
         return api.updateSupplierInvoice(editing.id, {
@@ -112,7 +147,15 @@ export default function SupplierInvoices() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["supplier-invoices"] })
   });
   const pay = useMutation({
-    mutationFn: () => api.recordSupplierInvoicePayment(detailFor!.id, { amount: numeric(paymentForm.amount), method: paymentForm.method, reference: paymentForm.reference || null, note: paymentForm.note || null }),
+    mutationFn: () => api.recordSupplierInvoicePayment(detailFor!.id, {
+      amount: numeric(paymentForm.amount),
+      method: paymentForm.method,
+      reference: paymentForm.reference || null,
+      attachmentName: paymentForm.attachmentName || null,
+      attachmentMime: paymentForm.attachmentMime || null,
+      attachmentData: paymentForm.attachmentData || null,
+      note: paymentForm.note || null
+    }),
     onSuccess: async () => {
       setPaymentForm(emptyPayment);
       await Promise.all([
@@ -139,7 +182,13 @@ export default function SupplierInvoices() {
       grnId: invoice.grnId ?? "",
       attachmentName: invoice.attachmentName ?? "",
       attachmentMime: invoice.attachmentMime ?? "",
-      attachmentData: invoice.attachmentData ?? ""
+      attachmentData: invoice.attachmentData ?? "",
+      paymentMethod: "bank",
+      paymentReference: "",
+      paymentNote: "",
+      paymentAttachmentName: "",
+      paymentAttachmentMime: "",
+      paymentAttachmentData: ""
     });
     setFormOpen(true);
   }
@@ -230,7 +279,23 @@ function InvoiceModal({ open, editing, form, setForm, suppliers, grns, saving, o
                 <LabeledField label="Invoice total" value={form.total} onChangeText={(total) => setForm({ ...form, total })} keyboardType="numeric" style={styles.gridField} />
                 <LabeledField label="Paid so far" value={form.paid} onChangeText={(paid) => setForm({ ...form, paid })} keyboardType="numeric" style={styles.gridField} />
               </View>
-              <AttachmentPicker value={form} onChange={(attachment) => setForm({ ...form, ...attachment })} />
+              <AttachmentPicker label="Invoice file" value={form} onChange={(attachment) => setForm({ ...form, ...attachment })} />
+              {numeric(form.paid) > 0 ? (
+                <Card style={styles.paymentBox}>
+                  <Text style={styles.sectionTitle}>Initial payment</Text>
+                  <Picker label="Payment method" items={["cash", "card", "mobile", "bank", "credit"].map((method) => ({ id: method, name: method }))} value={form.paymentMethod} onChange={(paymentMethod) => setForm({ ...form, paymentMethod: paymentMethod as InvoiceForm["paymentMethod"] })} />
+                  <View style={styles.grid}>
+                    <LabeledField label="Payment reference" value={form.paymentReference} onChangeText={(paymentReference) => setForm({ ...form, paymentReference })} style={styles.gridField} />
+                    <LabeledField label="Payment note" value={form.paymentNote} onChangeText={(paymentNote) => setForm({ ...form, paymentNote })} style={styles.gridField} />
+                  </View>
+                  <AttachmentPicker
+                    label="Proof of payment"
+                    helper="PDF or image POP, 5 MB max"
+                    value={{ attachmentName: form.paymentAttachmentName, attachmentMime: form.paymentAttachmentMime, attachmentData: form.paymentAttachmentData }}
+                    onChange={(attachment) => setForm({ ...form, paymentAttachmentName: attachment.attachmentName, paymentAttachmentMime: attachment.attachmentMime, paymentAttachmentData: attachment.attachmentData })}
+                  />
+                </Card>
+              ) : null}
             </ScrollView>
             <View style={styles.actions}>
               <Button variant="outline" onPress={onClose}>Cancel</Button>
@@ -263,7 +328,15 @@ function InvoiceDetail({ invoice, data, loading, paymentForm, setPaymentForm, pa
   const balance = Math.max(total - paid, 0);
   const historyRows = [
     { type: "invoice", ref: invoice.refNo, amount: total, note: "Supplier invoice" },
-    ...payments.map((payment) => ({ type: "payment", ref: payment.reference ?? payment.id, amount: payment.amount, note: payment.note ?? "" })),
+    ...payments.map((payment) => ({
+      type: "payment",
+      ref: payment.reference ?? payment.id,
+      amount: payment.amount,
+      note: payment.note ?? "",
+      attachmentName: payment.attachmentName ?? payment.attachment_name ?? "",
+      attachmentMime: payment.attachmentMime ?? payment.attachment_mime ?? "",
+      attachmentData: payment.attachmentData ?? payment.attachment_data ?? ""
+    })),
     ...expenses.map((expense) => ({ type: "expense", ref: expense.category ?? expense.id, amount: expense.amount, note: expense.description ?? "" }))
   ];
 
@@ -293,9 +366,8 @@ function InvoiceDetail({ invoice, data, loading, paymentForm, setPaymentForm, pa
             <Card style={styles.detailCard}>
               <View style={styles.detailCardHeader}>
                 <Text style={styles.sectionTitle}>Invoice file</Text>
-                <CommandButton icon="file-eye-outline" label="Open file" onPress={() => openDataAttachment(attachmentName || "invoice", attachmentData, attachmentMime)} />
               </View>
-              <Text style={styles.detailLine}>{attachmentName || "No file attached"}</Text>
+              <AttachmentActions name={attachmentName || null} mime={attachmentMime || null} data={attachmentData || null} />
             </Card>
             <Card style={styles.detailCard}>
               <Text style={styles.sectionTitle}>Record payment</Text>
@@ -307,15 +379,30 @@ function InvoiceDetail({ invoice, data, loading, paymentForm, setPaymentForm, pa
                 <LabeledField label="Reference" value={paymentForm.reference} onChangeText={(reference) => setPaymentForm({ ...paymentForm, reference })} style={styles.gridField} />
                 <LabeledField label="Note" value={paymentForm.note} onChangeText={(note) => setPaymentForm({ ...paymentForm, note })} style={styles.gridField} />
               </View>
+              <AttachmentPicker
+                label="Proof of payment"
+                helper="PDF or image POP, 5 MB max"
+                value={paymentForm}
+                onChange={(attachment) => setPaymentForm({ ...paymentForm, ...attachment })}
+              />
               <View style={styles.actions}><Button onPress={onPay} disabled={paying || numeric(paymentForm.amount) <= 0 || balance <= 0}>{paying ? "Saving..." : "Record payment"}</Button></View>
             </Card>
-            <TableCard minWidth={700}>
-              <TableHeader columns={["Type", "Reference", "Amount", "Note"]} />
+            <TableCard minWidth={930}>
+              <TableHeader columns={["Type", "Reference", "Amount", "POP", "Note"]} />
               {historyRows.map((row, index) => (
                 <View key={`${row.type}-${index}`} style={styles.row}>
                   <Text style={styles.refCell}>{String(row.type)}</Text>
                   <Text style={styles.nameCell}>{String(row.ref ?? "-")}</Text>
                   <Text style={styles.moneyCell}>{formatMwk(Number(row.amount ?? 0))}</Text>
+                  <View style={styles.popCell}>
+                    {row.type === "payment" ? (
+                      <AttachmentActions
+                        name={String((row as Record<string, unknown>).attachmentName ?? "") || null}
+                        mime={String((row as Record<string, unknown>).attachmentMime ?? "") || null}
+                        data={String((row as Record<string, unknown>).attachmentData ?? "") || null}
+                      />
+                    ) : <Text style={styles.attachmentCell}>-</Text>}
+                  </View>
                   <Text style={styles.attachmentCell}>{String(row.note ?? "")}</Text>
                 </View>
               ))}
@@ -415,6 +502,8 @@ const styles = StyleSheet.create({
   detailCard: { gap: 10, padding: 14 },
   detailCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" },
   detailLine: { color: colors.ink, fontSize: 13 },
+  paymentBox: { gap: 10, padding: 12 },
+  popCell: { width: 220, minWidth: 220 },
   hero: { flexDirection: "row", alignItems: "flex-start", gap: 12, padding: 18 },
   heroTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 34, fontWeight: "900" },
   heroText: { color: colors.muted, fontSize: 14, marginTop: 5 },

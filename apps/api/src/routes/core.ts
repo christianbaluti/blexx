@@ -13,7 +13,17 @@ type DbClient = {
 const idParam = z.object({ id: z.string().uuid() });
 const nullableText = z.string().trim().nullable().optional();
 const dataUrl = z.string().max(140_000).regex(/^data:[\w/+.-]+;base64,[A-Za-z0-9+/=]+$/).nullable().optional();
-const attachmentDataUrl = z.string().max(3_000_000).regex(/^data:[\w/+.-]+;base64,[A-Za-z0-9+/=]+$/).nullable().optional();
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const MAX_ATTACHMENT_DATA_URL_CHARS = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + 200;
+const attachmentDataUrl = z.string()
+  .max(MAX_ATTACHMENT_DATA_URL_CHARS, "Attached file must be 5 MB or smaller")
+  .regex(/^data:[\w/+.-]+;base64,[A-Za-z0-9+/=]+$/, "Attachment must be a base64 data URL")
+  .refine((value) => {
+    const base64 = value.split(",")[1] ?? "";
+    return Math.ceil((base64.length * 3) / 4) <= MAX_ATTACHMENT_BYTES;
+  }, "Attached file must be 5 MB or smaller")
+  .nullable()
+  .optional();
 
 function ref(prefix: string) {
   return `${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -230,7 +240,8 @@ const itemSchema = z.object({
   sku: z.string().trim().min(1),
   name: z.string().trim().min(1),
   unit: z.string().trim().default("ea"),
-  reorderLevel: z.number().nonnegative().default(0)
+  reorderLevel: z.number().nonnegative().default(0),
+  imageData: dataUrl
 });
 
 const productSchema = z.object({
@@ -294,6 +305,12 @@ const invoiceSchema = z.object({
   dueDate: nullableText,
   total: z.number().nonnegative(),
   paid: z.number().nonnegative().optional(),
+  paymentMethod: z.enum(["cash", "card", "mobile", "bank", "credit"]).optional(),
+  paymentReference: nullableText,
+  paymentNote: nullableText,
+  paymentAttachmentName: nullableText,
+  paymentAttachmentMime: nullableText,
+  paymentAttachmentData: attachmentDataUrl,
   attachmentName: nullableText,
   attachmentMime: nullableText,
   attachmentData: attachmentDataUrl,
@@ -523,21 +540,45 @@ export async function registerCoreRoutes(app: FastifyInstance) {
   app.get("/items", async () => {
     const result = await pool.query(`
       select i.id, i.sku, i.name, i.unit, i.reorder_level as "reorderLevel", i.average_cost as "averageCost",
-             i.status, coalesce(ws.quantity, 0) as stock
+             i.image_data as "imageData", i.image_mime as "imageMime", i.status, coalesce(ws.quantity, 0) as stock,
+             0::numeric as "shopStock"
       from items i
       left join warehouse_stock ws on ws.item_id = i.id
       order by i.name
     `);
-    return result.rows.map((row) => ({ ...row, stock: numberify(row.stock), averageCost: numberify(row.averageCost), reorderLevel: numberify(row.reorderLevel) }));
+    return result.rows.map((row) => ({
+      ...row,
+      stock: numberify(row.stock),
+      shopStock: numberify(row.shopStock),
+      averageCost: numberify(row.averageCost),
+      reorderLevel: numberify(row.reorderLevel)
+    }));
   });
 
   app.post("/items", async (request, reply) => {
     const body = itemSchema.parse(request.body);
+    if (body.imageData && Buffer.byteLength(body.imageData, "utf8") > 140_000) throw app.httpErrors.badRequest("Item image must be under 100 KB after optimization");
+    const mime = body.imageData?.match(/^data:([^;]+);/)?.[1] ?? null;
     const result = await pool.query(
-      "insert into items (sku, name, unit, reorder_level) values ($1,$2,$3,$4) returning id",
-      [body.sku, body.name, body.unit, body.reorderLevel]
+      "insert into items (sku, name, unit, reorder_level, image_data, image_mime) values ($1,$2,$3,$4,$5,$6) returning id",
+      [body.sku, body.name, body.unit, body.reorderLevel, body.imageData ?? null, mime]
     );
     return reply.code(201).send({ id: result.rows[0].id });
+  });
+
+  app.patch("/items/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const body = itemSchema.partial().parse(request.body);
+    if (body.imageData && Buffer.byteLength(body.imageData, "utf8") > 140_000) throw app.httpErrors.badRequest("Item image must be under 100 KB after optimization");
+    const mime = body.imageData?.match(/^data:([^;]+);/)?.[1] ?? null;
+    await pool.query(
+      `update items set sku = coalesce($2, sku), name = coalesce($3, name), unit = coalesce($4, unit),
+       reorder_level = coalesce($5, reorder_level), image_data = coalesce($6, image_data), image_mime = coalesce($7, image_mime),
+       updated_at = now()
+       where id = $1`,
+      [id, body.sku ?? null, body.name ?? null, body.unit ?? null, body.reorderLevel ?? null, body.imageData ?? null, mime]
+    );
+    return { ok: true };
   });
 
   app.get("/products", async () => {
@@ -913,14 +954,33 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     const body = invoiceSchema.parse(request.body);
     const paid = body.paid ?? 0;
     const status = paid >= body.total && body.total > 0 ? "paid" : paid > 0 ? "partial" : "open";
-    const result = await pool.query(
-      `insert into supplier_invoices (ref_no, supplier_id, purchase_order_id, grn_id, invoice_date, due_date, total, paid, status, attachment_name, attachment_mime, attachment_data, note)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning id, ref_no`,
-      [ref("SI"), body.supplierId, body.purchaseOrderId ?? null, body.grnId ?? null, body.invoiceDate ?? new Date().toISOString().slice(0, 10), body.dueDate ?? null, body.total, paid, status, body.attachmentName ?? null, body.attachmentMime ?? null, body.attachmentData ?? null, body.note ?? null]
-    );
-    await pool.query("insert into expenses (supplier_invoice_id, category, description, amount) values ($1,'supplier_invoice','Supplier invoice',$2)", [result.rows[0].id, body.total]);
-    await pool.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_invoice','supplier_invoice',$1,$2,'Supplier invoice')", [result.rows[0].id, body.total]);
-    return reply.code(201).send({ id: result.rows[0].id, refNo: result.rows[0].ref_no });
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const result = await client.query(
+        `insert into supplier_invoices (ref_no, supplier_id, purchase_order_id, grn_id, invoice_date, due_date, total, paid, status, attachment_name, attachment_mime, attachment_data, note)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning id, ref_no`,
+        [ref("SI"), body.supplierId, body.purchaseOrderId ?? null, body.grnId ?? null, body.invoiceDate ?? new Date().toISOString().slice(0, 10), body.dueDate ?? null, body.total, paid, status, body.attachmentName ?? null, body.attachmentMime ?? null, body.attachmentData ?? null, body.note ?? null]
+      );
+      const invoiceId = result.rows[0].id;
+      await client.query("insert into expenses (supplier_invoice_id, category, description, amount, status) values ($1,'supplier_invoice','Supplier invoice',$2,$3)", [invoiceId, body.total, status]);
+      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_invoice','supplier_invoice',$1,$2,'Supplier invoice')", [invoiceId, body.total]);
+      if (paid > 0) {
+        await client.query(
+          `insert into payments (party_type, supplier_id, supplier_invoice_id, method, amount, reference, attachment_name, attachment_mime, attachment_data, note)
+           values ('supplier',$1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [body.supplierId, invoiceId, body.paymentMethod ?? "bank", paid, body.paymentReference ?? null, body.paymentAttachmentName ?? null, body.paymentAttachmentMime ?? null, body.paymentAttachmentData ?? null, body.paymentNote ?? null]
+        );
+        await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_payment','supplier_invoice',$1,$2,'Supplier payment')", [invoiceId, paid]);
+      }
+      await client.query("commit");
+      return reply.code(201).send({ id: result.rows[0].id, refNo: result.rows[0].ref_no });
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   app.get("/supplier-invoices", async () => {
@@ -982,16 +1042,24 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.post("/supplier-invoices/:id/payments", async (request) => {
     const { id } = idParam.parse(request.params);
-    const body = z.object({ amount: z.number().positive(), method: z.enum(["cash", "card", "mobile", "bank", "credit"]), reference: nullableText, note: nullableText }).parse(request.body);
+    const body = z.object({
+      amount: z.number().positive(),
+      method: z.enum(["cash", "card", "mobile", "bank", "credit"]),
+      reference: nullableText,
+      attachmentName: nullableText,
+      attachmentMime: nullableText,
+      attachmentData: attachmentDataUrl,
+      note: nullableText
+    }).parse(request.body);
     const client = await pool.connect();
     try {
       await client.query("begin");
       const invoice = await client.query("select * from supplier_invoices where id = $1 for update", [id]);
       if (!invoice.rows[0]) throw app.httpErrors.notFound("Invoice not found");
       await client.query(
-        `insert into payments (party_type, supplier_id, supplier_invoice_id, method, amount, reference, note)
-         values ('supplier',$1,$2,$3,$4,$5,$6)`,
-        [invoice.rows[0].supplier_id, id, body.method, body.amount, body.reference ?? null, body.note ?? null]
+        `insert into payments (party_type, supplier_id, supplier_invoice_id, method, amount, reference, attachment_name, attachment_mime, attachment_data, note)
+         values ('supplier',$1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [invoice.rows[0].supplier_id, id, body.method, body.amount, body.reference ?? null, body.attachmentName ?? null, body.attachmentMime ?? null, body.attachmentData ?? null, body.note ?? null]
       );
       const paid = numberify(invoice.rows[0].paid) + body.amount;
       const status = paid >= numberify(invoice.rows[0].total) ? "paid" : "partial";

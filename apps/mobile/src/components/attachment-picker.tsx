@@ -1,8 +1,10 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
-import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { colors } from "../lib/theme";
+
+export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 
 export type AttachmentValue = {
   attachmentName: string;
@@ -10,7 +12,39 @@ export type AttachmentValue = {
   attachmentData: string;
 };
 
-export function AttachmentPicker({ value, onChange }: { value: AttachmentValue; onChange: (value: AttachmentValue) => void }) {
+type WebDocumentAsset = DocumentPicker.DocumentPickerAsset & { file?: Blob };
+
+function bytesFromDataUrl(dataUrl: string) {
+  const base64 = dataUrl.split(",")[1] ?? "";
+  return Math.ceil((base64.length * 3) / 4);
+}
+
+function formatSize(bytes: number) {
+  return `${(bytes / (1024 * 1024)).toFixed(bytes >= 1024 * 1024 ? 1 : 2)} MB`;
+}
+
+function readWebFile(file: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+export function AttachmentPicker({
+  value,
+  onChange,
+  label = "Invoice file",
+  helper = "PDF or image, 5 MB max",
+  maxBytes = MAX_ATTACHMENT_BYTES
+}: {
+  value: AttachmentValue;
+  onChange: (value: AttachmentValue) => void;
+  label?: string;
+  helper?: string;
+  maxBytes?: number;
+}) {
   async function pick() {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -19,13 +53,25 @@ export function AttachmentPicker({ value, onChange }: { value: AttachmentValue; 
         type: ["application/pdf", "image/*"]
       });
       if (result.canceled) return;
-      const asset = result.assets[0];
+      const asset = result.assets[0] as WebDocumentAsset;
       const mime = asset.mimeType || "application/octet-stream";
-      const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 });
+      const size = asset.size ?? asset.file?.size;
+      if (size && size > maxBytes) {
+        Alert.alert("File too large", `Choose a file up to ${formatSize(maxBytes)}. This file is ${formatSize(size)}.`);
+        return;
+      }
+      const dataUrl =
+        Platform.OS === "web" && asset.file
+          ? await readWebFile(asset.file)
+          : `data:${mime};base64,${await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 })}`;
+      if (bytesFromDataUrl(dataUrl) > maxBytes) {
+        Alert.alert("File too large", `Choose a file up to ${formatSize(maxBytes)}.`);
+        return;
+      }
       onChange({
         attachmentName: asset.name || "invoice",
         attachmentMime: mime,
-        attachmentData: `data:${mime};base64,${base64}`
+        attachmentData: dataUrl.startsWith("data:") ? dataUrl : `data:${mime};base64,${dataUrl}`
       });
     } catch (error) {
       Alert.alert("Could not attach file", error instanceof Error ? error.message : "Choose a PDF or image and try again.");
@@ -34,7 +80,7 @@ export function AttachmentPicker({ value, onChange }: { value: AttachmentValue; 
 
   return (
     <View style={styles.wrap}>
-      <Text style={styles.label}>Invoice file</Text>
+      <Text style={styles.label}>{label}</Text>
       <View style={styles.row}>
         <Pressable style={styles.pickButton} onPress={pick}>
           <MaterialCommunityIcons name="paperclip" size={18} color={colors.ink} />
@@ -46,7 +92,7 @@ export function AttachmentPicker({ value, onChange }: { value: AttachmentValue; 
           </Pressable>
         ) : null}
       </View>
-      {value.attachmentMime ? <Text style={styles.meta}>{value.attachmentMime}</Text> : null}
+      <Text style={styles.meta}>{value.attachmentMime || helper}</Text>
     </View>
   );
 }

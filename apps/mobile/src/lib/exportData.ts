@@ -18,6 +18,8 @@ type BrowserGlobal = typeof globalThis & {
     body?: { appendChild: (node: unknown) => void };
   };
   URL?: { createObjectURL: (blob: Blob) => string; revokeObjectURL: (url: string) => void };
+  atob?: (value: string) => string;
+  open?: (url: string, target?: string) => unknown;
 };
 
 function safeFilename(title: string, extension: string) {
@@ -123,6 +125,24 @@ function downloadInBrowser(filename: string, blob: Blob) {
   return true;
 }
 
+function blobFromBase64(base64: string, mimeType: string) {
+  const browser = globalThis as BrowserGlobal;
+  if (!browser.atob) return null;
+  const binary = browser.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: mimeType });
+}
+
+export function openBlobInBrowser(blob: Blob) {
+  const browser = globalThis as BrowserGlobal;
+  if (!browser.URL || !browser.open) return false;
+  const url = browser.URL.createObjectURL(blob);
+  browser.open(url, "_blank");
+  setTimeout(() => browser.URL?.revokeObjectURL(url), 60_000);
+  return true;
+}
+
 async function shareFile(uri: string, mimeType: string, dialogTitle: string) {
   const canShare = await Sharing.isAvailableAsync();
   if (!canShare && mimeType === "application/pdf") {
@@ -145,12 +165,20 @@ export async function saveTextFile(filename: string, body: string, mimeType: str
 
 export async function saveBase64File(filename: string, base64: string, mimeType: string) {
   if (Platform.OS === "web") {
-    const response = await fetch(`data:${mimeType};base64,${base64}`);
-    if (downloadInBrowser(filename, await response.blob())) return;
+    const blob = blobFromBase64(base64, mimeType);
+    if (blob && downloadInBrowser(filename, blob)) return;
   }
   const uri = `${FileSystem.cacheDirectory}${filename}`;
   await FileSystem.writeAsStringAsync(uri, base64, { encoding: FileSystem.EncodingType.Base64 });
   await shareFile(uri, mimeType, filename);
+}
+
+export async function openBase64File(filename: string, base64: string, mimeType: string) {
+  if (Platform.OS === "web") {
+    const blob = blobFromBase64(base64, mimeType);
+    if (blob && openBlobInBrowser(blob)) return;
+  }
+  await saveBase64File(filename, base64, mimeType);
 }
 
 export async function exportRows(title: string, rows: Record<string, unknown>[], format: ExportFormat) {
