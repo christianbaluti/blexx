@@ -10,6 +10,8 @@ lerna-debug.log*
 
 node_modules
 dist
+!api/dist/
+!api/dist/**
 dist-ssr
 .output
 .vinxi

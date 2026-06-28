@@ -1,10 +1,33 @@
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+async function removeNonRuntimeFiles(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  await Promise.all(
+    entries.map(async (entry) => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await removeNonRuntimeFiles(path);
+        return;
+      }
+      if (
+        entry.name.endsWith(".d.ts") ||
+        entry.name.endsWith(".test.js") ||
+        entry.name === "server.js" ||
+        entry.name === "db-migrate.js" ||
+        entry.name === "setup-db.js"
+      ) {
+        await rm(path, { force: true });
+      }
+    })
+  );
+}
 
 const apiDist = join(process.cwd(), "api", "dist");
 await rm(apiDist, { recursive: true, force: true });
 await mkdir(apiDist, { recursive: true });
 await cp(join(process.cwd(), "apps", "api", "dist"), apiDist, { recursive: true });
+await removeNonRuntimeFiles(apiDist);
 
 const entries = [
   {
