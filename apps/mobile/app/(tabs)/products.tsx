@@ -1,5 +1,6 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import { useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -137,15 +138,23 @@ export default function Products() {
 
   async function pickImage() {
     const result = await ImagePicker.launchImageLibraryAsync({
-      base64: true,
       quality: 0.18,
       allowsEditing: true,
       aspect: [1, 1],
       mediaTypes: ImagePicker.MediaTypeOptions.Images
     });
-    if (result.canceled || !result.assets[0]?.base64) return;
+    if (result.canceled || !result.assets[0]?.uri) return;
     const asset = result.assets[0];
-    const imageUrl = `data:${asset.mimeType ?? "image/jpeg"};base64,${asset.base64}`;
+    const optimized = await ImageManipulator.manipulateAsync(
+      asset.uri,
+      [{ resize: { width: 420 } }],
+      { compress: 0.18, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+    );
+    if (!optimized.base64) {
+      Alert.alert("Image failed", "Could not read the selected image. Please choose a JPEG or PNG image.");
+      return;
+    }
+    const imageUrl = `data:image/jpeg;base64,${optimized.base64}`;
     if (dataUrlBytes(imageUrl) > MAX_IMAGE_BYTES) {
       Alert.alert("Image too large", "The optimized image is still above 100 KB. Please choose a smaller square image.");
       return;
@@ -160,7 +169,9 @@ export default function Products() {
     category: product.categoryName ?? "Uncategorised",
     cost: product.cost,
     price: product.price,
-    stock: product.stock,
+    warehouseStock: stockValue(product, "warehouseStock"),
+    shopStock: stockValue(product, "shopStock", product.stock),
+    totalStock: stockValue(product, "warehouseStock") + stockValue(product, "shopStock", product.stock),
     reorder: product.reorder,
     unit: product.unit
   }));
@@ -170,16 +181,16 @@ export default function Products() {
       <ScrollView contentContainerStyle={styles.content}>
         <PageHeader
           eyebrow="Catalogue"
-          title="Products"
-          description="Manage SKUs, barcodes, product photos, pricing, categories and stock thresholds."
+          title="Finished Products"
+          description="Manage sellable products, photos, pricing and stock thresholds across Warehouse and Shop."
           actions={<CommandButton icon="plus" label="New product" primary onPress={openNew} />}
         />
 
         <View style={styles.metrics}>
           <MetricCard label="Total SKUs" value={products.length} icon="tag-multiple-outline" />
           <MetricCard label="Categories" value={categories.length} icon="shape-outline" />
-          <MetricCard label="Stock value" value={formatMwk(products.reduce((sum, item) => sum + item.stock * item.cost, 0))} icon="cash-multiple" />
-          <MetricCard label="Low stock" value={products.filter((item) => item.stock <= item.reorder).length} tone="danger" icon="alert-octagon-outline" />
+          <MetricCard label="Stock value" value={formatMwk(products.reduce((sum, item) => sum + (stockValue(item, "warehouseStock") + stockValue(item, "shopStock", item.stock)) * item.cost, 0))} icon="cash-multiple" />
+          <MetricCard label="Low shop stock" value={products.filter((item) => stockValue(item, "shopStock", item.stock) <= item.reorder).length} tone="danger" icon="alert-octagon-outline" />
         </View>
 
         <TableCard>
@@ -201,7 +212,7 @@ export default function Products() {
             <ExportMenu title="products" rows={exportRows} />
             {isLoading ? <ActivityIndicator color={colors.accent} /> : null}
           </View>
-          <TableHeader columns={["Product", "SKU", "Barcode", "Category", "Cost", "Price", "Stock", ""]} />
+          <TableHeader columns={["Product", "SKU", "Barcode", "Category", "Cost", "Price", "Warehouse", "Shop", ""]} />
           {filtered.map((item) => (
             <Pressable key={item.id} style={styles.row} onPress={() => openEdit(item)}>
               <View style={styles.productCell}>
@@ -217,7 +228,8 @@ export default function Products() {
               <View style={styles.cell}><Badge tone="muted">{item.categoryName ?? "Uncategorised"}</Badge></View>
               <Text style={styles.rightCell}>{formatMwk(item.cost)}</Text>
               <Text style={styles.rightCell}>{item.price ? formatMwk(item.price) : "-"}</Text>
-              <Text style={[styles.rightCell, item.stock <= item.reorder && styles.lowStock]}>{item.stock} {item.unit}</Text>
+              <Text style={styles.rightCell}>{stockValue(item, "warehouseStock")} {item.unit}</Text>
+              <Text style={[styles.rightCell, stockValue(item, "shopStock", item.stock) <= item.reorder && styles.lowStock]}>{stockValue(item, "shopStock", item.stock)} {item.unit}</Text>
               <View style={styles.editButton}>
                 <MaterialCommunityIcons name="pencil-outline" size={16} color={colors.muted} />
               </View>
@@ -251,6 +263,10 @@ export default function Products() {
 function dataUrlBytes(dataUrl: string) {
   const base64 = dataUrl.split(",")[1] ?? "";
   return Math.ceil((base64.length * 3) / 4);
+}
+
+function stockValue(product: Product, key: "warehouseStock" | "shopStock", fallback = 0) {
+  return Number((product as Product & Record<typeof key, number | undefined>)[key] ?? fallback);
 }
 
 function ProductModal({

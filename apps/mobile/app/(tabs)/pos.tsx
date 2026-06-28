@@ -25,9 +25,11 @@ export default function Pos() {
   const [category, setCategory] = useState<string>("all");
   const [compactPane, setCompactPane] = useState<"items" | "cart">("items");
   const [cart, setCart] = useState<CartLine[]>([]);
+  const [customerId, setCustomerId] = useState("");
+  const [discount, setDiscount] = useState("0");
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products, enabled: auth.isAuthenticated });
   const { data: categories = [] } = useQuery({ queryKey: ["categories"], queryFn: api.categories, enabled: auth.isAuthenticated });
-  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings, enabled: auth.isAuthenticated });
+  const { data: customers = [] } = useQuery({ queryKey: ["customers"], queryFn: api.customers, enabled: auth.isAuthenticated });
 
   const chips = useMemo(() => [{ id: "all", name: "All" }, ...categories], [categories]);
   const sellable = useMemo(
@@ -40,40 +42,50 @@ export default function Pos() {
   );
 
   const subtotal = cart.reduce((sum, line) => sum + line.product.price * line.qty, 0);
-  const vatRate = settings?.company.vatRate ?? 16.5;
-  const tax = Math.round(subtotal * (vatRate / 100));
-  const total = subtotal + tax;
+  const discountAmount = Math.min(Number(discount || 0), subtotal);
+  const total = Math.max(0, subtotal - discountAmount);
 
   const checkout = useMutation({
     mutationFn: (payment: Sale["payment"]) =>
       api.createSale({
         cashierId: auth.user!.id,
+        customerId: customerId || null,
         payment,
+        discount: discountAmount,
         lines: cart.map((line) => ({ productId: line.product.id, qty: line.qty, price: line.product.price, discount: 0 }))
       }),
-    onSuccess: async (sale) => {
+    onSuccess: async (sale, payment) => {
       await shareReceipt({
         refNo: sale.refNo,
         total: sale.total,
-        lines: cart.map((line) => ({ productId: line.product.id, qty: line.qty, price: line.product.price, discount: 0 }))
+        subtotal,
+        discount: discountAmount,
+        payment,
+        customerName: customers.find((customer) => customer.id === customerId)?.name ?? "Walk-in customer",
+        lines: cart.map((line) => ({ productId: line.product.id, name: line.product.name, qty: line.qty, price: line.product.price, discount: 0 }))
       }).catch(() => undefined);
       setCart([]);
+      setDiscount("0");
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["products"] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
-        queryClient.invalidateQueries({ queryKey: ["sales"] })
+        queryClient.invalidateQueries({ queryKey: ["sales"] }),
+        queryClient.invalidateQueries({ queryKey: ["receipts"] }),
+        queryClient.invalidateQueries({ queryKey: ["customers"] })
       ]);
     },
     onError: (_error, payment) => {
       enqueueMutation(createOfflineMutation("sale", "create", {
         cashierId: auth.user!.id,
+        customerId: customerId || null,
         payment,
+        discount: discountAmount,
         lines: cart.map((line) => ({ productId: line.product.id, qty: line.qty, price: line.product.price, discount: 0 })),
         subtotal,
-        tax,
         total
       }));
       setCart([]);
+      setDiscount("0");
     }
   });
 
@@ -234,9 +246,24 @@ export default function Pos() {
               ) : null}
             </ScrollView>
 
+            <View style={styles.customerPanel}>
+              <Text style={styles.customerLabel}>Customer</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.customerRail}>
+                {[{ id: "", name: "Walk-in customer" }, ...customers].map((customer) => {
+                  const active = customerId === customer.id;
+                  return (
+                    <Pressable key={customer.id || "walk-in"} style={[styles.customerChip, active && styles.customerChipActive]} onPress={() => setCustomerId(customer.id)}>
+                      <Text style={[styles.customerChipText, active && styles.customerChipTextActive]}>{customer.name}</Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            </View>
+
             <View style={styles.totals}>
+              <Field value={discount} onChangeText={setDiscount} keyboardType="numeric" placeholder="Sale discount" />
               <View style={styles.totalRow}><Text style={styles.totalLabel}>Subtotal</Text><Text style={styles.totalValue}>{formatMwk(subtotal)}</Text></View>
-              <View style={styles.totalRow}><Text style={styles.totalLabel}>VAT {vatRate}%</Text><Text style={styles.totalValue}>{formatMwk(tax)}</Text></View>
+              <View style={styles.totalRow}><Text style={styles.totalLabel}>Discount</Text><Text style={styles.totalValue}>{formatMwk(discountAmount)}</Text></View>
               <View style={styles.grandRow}><Text style={styles.grandLabel}>Total</Text><Text style={styles.grandValue}>{formatMwk(total)}</Text></View>
             </View>
 
@@ -244,6 +271,7 @@ export default function Pos() {
               <Button onPress={() => checkout.mutate("cash")} disabled={!cart.length || checkout.isPending}>Cash</Button>
               <Button variant="outline" onPress={() => checkout.mutate("card")} disabled={!cart.length || checkout.isPending}>Card</Button>
               <Button variant="outline" onPress={() => checkout.mutate("mobile")} disabled={!cart.length || checkout.isPending}>Mobile</Button>
+              <Button variant="outline" onPress={() => checkout.mutate("credit")} disabled={!cart.length || checkout.isPending || !customerId}>Credit</Button>
             </View>
           </View> : null}
         </View>
@@ -311,6 +339,13 @@ const styles = StyleSheet.create({
   lineTotal: { color: colors.ink, fontWeight: "900" },
   cartEmpty: { minHeight: 170, alignItems: "center", justifyContent: "center" },
   empty: { color: colors.muted, paddingVertical: 18, textAlign: "center" },
+  customerPanel: { borderTopWidth: 1, borderTopColor: colors.line, paddingTop: 10, gap: 7 },
+  customerLabel: { color: colors.muted, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
+  customerRail: { gap: 8, paddingVertical: 1 },
+  customerChip: { minHeight: 34, justifyContent: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 7, backgroundColor: colors.surface, paddingHorizontal: 11 },
+  customerChipActive: { backgroundColor: colors.sidebar, borderColor: colors.sidebar },
+  customerChipText: { color: colors.muted, fontSize: 12, fontWeight: "900" },
+  customerChipTextActive: { color: colors.sidebarText },
   totals: { borderTopWidth: 1, borderTopColor: colors.line, paddingTop: 12, gap: 8 },
   totalRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   totalLabel: { color: colors.muted, fontWeight: "700" },
@@ -318,5 +353,5 @@ const styles = StyleSheet.create({
   grandRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", paddingTop: 8 },
   grandLabel: { color: colors.ink, fontSize: 17, fontWeight: "900" },
   grandValue: { color: colors.accent, fontFamily: typography.displayBold, fontSize: 27, fontWeight: "700" },
-  payments: { flexDirection: "row", gap: 8, marginTop: 13 }
+  payments: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 13 }
 });

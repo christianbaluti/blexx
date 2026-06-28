@@ -15,17 +15,23 @@ export default function Production() {
   const [tab, setTab] = useState<ProductionTab>("bom");
   const [open, setOpen] = useState(false);
   const [bomId, setBomId] = useState("");
-  const [outletId, setOutletId] = useState("");
   const [qtyProduced, setQtyProduced] = useState("1");
   const [qtyWaste, setQtyWaste] = useState("0");
+  const [extraCost, setExtraCost] = useState("0");
+  const [sellingPrice, setSellingPrice] = useState("");
   const { data: boms = [] } = useQuery({ queryKey: ["boms"], queryFn: api.boms });
   const { data: batches = [] } = useQuery({ queryKey: ["production"], queryFn: api.production });
-  const { data: outlets = [] } = useQuery({ queryKey: ["outlets"], queryFn: api.outlets });
   const totalCost = batches.reduce((sum, batch) => sum + batch.totalCost, 0);
   const totalWaste = batches.reduce((sum, batch) => sum + batch.qtyWaste, 0);
   const selectedBom = boms.find((bom) => bom.id === bomId);
   const runProduction = useMutation({
-    mutationFn: () => api.createProduction({ bomId, outletId, qtyProduced: Number(qtyProduced || 0), qtyWaste: Number(qtyWaste || 0) }),
+    mutationFn: () => api.createProduction({
+      bomId,
+      qtyProduced: Number(qtyProduced || 0),
+      qtyWaste: Number(qtyWaste || 0),
+      extraCost: Number(extraCost || 0),
+      sellingPrice: sellingPrice ? Number(sellingPrice) : undefined
+    }),
     onSuccess: async () => {
       setOpen(false);
       await Promise.all([
@@ -39,9 +45,10 @@ export default function Production() {
 
   function openRun(nextBomId?: string) {
     setBomId(nextBomId ?? boms[0]?.id ?? "");
-    setOutletId(String(outlets[0]?.id ?? ""));
     setQtyProduced("1");
     setQtyWaste("0");
+    setExtraCost("0");
+    setSellingPrice("");
     setOpen(true);
   }
 
@@ -145,18 +152,23 @@ export default function Production() {
           <Pressable style={styles.panel}>
             <Text style={styles.modalTitle}>Run production</Text>
             <PickerRail label="BOM blueprint" items={boms.map((bom) => ({ id: bom.id, name: bom.name }))} value={bomId} onChange={setBomId} />
-            <PickerRail label="Warehouse or shop" items={outlets.map((outlet) => ({ id: String(outlet.id), name: String(outlet.name) }))} value={outletId} onChange={setOutletId} />
+            <View style={styles.locationPill}>
+              <MaterialCommunityIcons name="warehouse" size={17} color={colors.accent} />
+              <Text style={styles.locationText}>Finished products will be created in Main Warehouse.</Text>
+            </View>
             <View style={styles.grid}>
               <Field style={styles.gridField} value={qtyProduced} onChangeText={setQtyProduced} keyboardType="numeric" placeholder="Produced quantity" />
               <Field style={styles.gridField} value={qtyWaste} onChangeText={setQtyWaste} keyboardType="numeric" placeholder="Wasted quantity" />
+              <Field style={styles.gridField} value={extraCost} onChangeText={setExtraCost} keyboardType="numeric" placeholder="Extra production cost" />
+              <Field style={styles.gridField} value={sellingPrice} onChangeText={setSellingPrice} keyboardType="numeric" placeholder="Selling price after production" />
             </View>
             <Text style={styles.summaryText}>
-              Expected output per build: {selectedBom?.outputQty ?? 1}. Materials are deducted from the selected location.
+              Expected output per build: {selectedBom?.outputQty ?? 1}. Raw items are deducted from Warehouse and finished stock is created in Warehouse.
             </Text>
             {runProduction.error ? <Text style={styles.error}>{runProduction.error instanceof Error ? runProduction.error.message : "Production failed"}</Text> : null}
             <View style={styles.modalActions}>
               <Button variant="outline" onPress={() => setOpen(false)}>Cancel</Button>
-              <Button onPress={() => runProduction.mutate()} disabled={!bomId || !outletId || !Number(qtyProduced) || runProduction.isPending}>Run</Button>
+              <Button onPress={() => runProduction.mutate()} disabled={!bomId || !Number(qtyProduced) || runProduction.isPending}>Run</Button>
             </View>
           </Pressable>
         </Pressable>
@@ -216,6 +228,8 @@ const styles = StyleSheet.create({
   optionChipActive: { backgroundColor: colors.sidebar, borderColor: colors.sidebar },
   optionText: { color: colors.muted, fontSize: 12, fontWeight: "900" },
   optionTextActive: { color: colors.sidebarText },
+  locationPill: { minHeight: 42, flexDirection: "row", alignItems: "center", gap: 8, borderWidth: 1, borderColor: colors.line, borderRadius: 7, backgroundColor: colors.surfaceAlt, paddingHorizontal: 11 },
+  locationText: { flex: 1, color: colors.ink, fontSize: 12, fontWeight: "800" },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   gridField: { flex: 1, minWidth: 180 },
   summaryText: { color: colors.muted, fontSize: 12 },

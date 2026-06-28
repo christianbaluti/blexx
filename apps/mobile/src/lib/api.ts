@@ -140,13 +140,16 @@ export const api = {
   },
   async dashboard() {
     const data = await cached<Record<string, unknown>>("dashboard", "/dashboard", {});
+    const revenueTrend = Array.isArray(data.revenueTrend) ? data.revenueTrend as Record<string, unknown>[] : [];
+    const topProducts = Array.isArray(data.topProducts) ? data.topProducts as Record<string, unknown>[] : [];
     return {
       revenue14d: Number(data.revenue14d ?? 0),
       stockValue: Number(data.warehouseValue ?? 0) + Number(data.shopValue ?? 0),
       transactionCount14d: Number(data.salesCount ?? 0),
       lowStockCount: Number(data.lowStockCount ?? 0),
-      revenueTrend: [] as DashboardSummary["revenueTrend"],
-      topProducts: [] as DashboardSummary["topProducts"]
+      profit14d: Number(data.profit14d ?? 0),
+      revenueTrend: revenueTrend.map((entry) => ({ day: String(entry.day ?? ""), revenue: Number(entry.revenue ?? 0) })),
+      topProducts: topProducts.map((entry) => ({ name: String(entry.name ?? ""), stock: Number(entry.stock ?? 0) }))
     } satisfies DashboardSummary;
   },
   async products() {
@@ -188,7 +191,20 @@ export const api = {
     }));
   },
   categories: async () => [] as Category[],
-  suppliers: () => cached<Supplier[]>("suppliers", "/suppliers", []),
+  async suppliers() {
+    const rows = await cached<Record<string, unknown>[]>("suppliers", "/suppliers", []);
+    return rows.map((row) => ({
+      ...row,
+      id: String(row.id),
+      name: String(row.name ?? ""),
+      phone: row.phone ? String(row.phone) : null,
+      email: row.email ? String(row.email) : null,
+      address: row.address ? String(row.address) : null,
+      note: row.note ? String(row.note) : null,
+      balance: Number(row.balance ?? 0),
+      status: String(row.status ?? "active") as Supplier["status"]
+    }));
+  },
   async customers() {
     const rows = await cached<Record<string, unknown>[]>("customers", "/customers", []);
     return rows.map((row) => ({
@@ -199,7 +215,7 @@ export const api = {
       address: row.address ? String(row.address) : null,
       loyaltyPoints: 0,
       creditLimit: 0,
-      balance: 0,
+      balance: Number(row.balance ?? 0),
       totalPurchases: Number(row.totalPurchases ?? 0),
       saleCount: Number(row.saleCount ?? 0),
       status: String(row.status ?? "active") as Customer["status"]
@@ -234,10 +250,27 @@ export const api = {
     }));
   },
   returns: () => cached<Record<string, unknown>[]>("returns", "/returns", []),
-  receipts: () => cached<Record<string, unknown>[]>("receipts", "/receipts", []),
+  async receipts() {
+    const rows = await cached<Record<string, unknown>[]>("receipts", "/receipts", []);
+    return rows.map((row) => ({
+      ...row,
+      id: String(row.id),
+      refNo: String(row.refNo ?? row.receiptNo ?? ""),
+      receiptNo: String(row.receiptNo ?? row.refNo ?? ""),
+      saleRefNo: String(row.saleRefNo ?? ""),
+      payment: String(row.payment ?? ""),
+      customerName: row.customerName ? String(row.customerName) : "Walk-in customer",
+      lineCount: Number(row.lineCount ?? (Array.isArray((row.payload as { items?: unknown[] } | undefined)?.items) ? (row.payload as { items?: unknown[] }).items?.length ?? 0 : 0)),
+      subtotal: Number(row.subtotal ?? 0),
+      discount: Number(row.discount ?? 0),
+      total: Number(row.total ?? 0),
+      status: String(row.status ?? "completed"),
+      createdAt: String(row.createdAt ?? row.created_at ?? "")
+    }));
+  },
   expenses: () => cached<Expense[]>("expenses", "/expenses", []),
   audit: () => cached<AuditEntry[]>("audit", "/audit", []),
-  notifications: async () => [] as NotificationItem[],
+  notifications: () => cached<NotificationItem[]>("notifications", "/notifications", []),
   markNotificationRead(id: string) {
     return request<{ ok: boolean }>(`/notifications/${id}/read`, { method: "POST" });
   },
@@ -275,10 +308,22 @@ export const api = {
       }))
     ];
   },
-  batches: async () => [] as InventoryBatch[],
-  movements: async () => [] as StockMovement[],
+  batches: () => cached<InventoryBatch[]>("inventory-batches", "/stock/batches", []),
+  movements: () => cached<StockMovement[]>("inventory-movements", "/stock/movements", []),
   stockCounts: () => cached<StockCount[]>("stock-counts", "/stock-counts", []),
-  transfers: () => cached<Transfer[]>("transfers", "/transfers", []),
+  async transfers() {
+    const rows = await cached<Record<string, unknown>[]>("transfers", "/transfers", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      fromOutletId: String(row.fromOutletId ?? row.from_location_id ?? ""),
+      toOutletId: String(row.toOutletId ?? row.to_location_id ?? ""),
+      fromOutletName: String(row.fromOutletName ?? row.fromLocation ?? "Warehouse"),
+      toOutletName: String(row.toOutletName ?? row.toLocation ?? "Shop"),
+      status: String(row.status ?? "received") as Transfer["status"],
+      totalItems: Number(row.totalItems ?? row.quantity ?? 0),
+      createdAt: String(row.createdAt ?? row.transferred_at ?? "")
+    }));
+  },
   async boms() {
     const rows = await cached<Record<string, unknown>[]>("blueprints", "/blueprints", []);
     return rows.map((row) => ({
@@ -298,7 +343,20 @@ export const api = {
         : []
     }));
   },
-  production: () => cached<ProductionBatch[]>("production", "/production", []),
+  async production() {
+    const rows = await cached<Record<string, unknown>[]>("production", "/production", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      refNo: String(row.refNo ?? row.ref_no ?? ""),
+      bomId: String(row.bomId ?? row.blueprint_id ?? ""),
+      bomName: String(row.bomName ?? row.blueprintName ?? ""),
+      outletId: String(row.outletId ?? row.warehouse_location_id ?? "warehouse"),
+      qtyProduced: Number(row.qtyProduced ?? row.quantity_produced ?? 0),
+      qtyWaste: Number(row.qtyWaste ?? row.quantity_wasted ?? 0),
+      totalCost: Number(row.totalCost ?? row.total_cost ?? 0),
+      producedAt: String(row.producedAt ?? row.produced_at ?? "")
+    })) as ProductionBatch[];
+  },
   async grn() {
     const rows = await cached<Record<string, unknown>[]>("grn", "/grns", []);
     return rows.map((row) => ({
@@ -362,15 +420,17 @@ export const api = {
   },
   async statements() {
     const row = await cached<Record<string, unknown>>("statements", "/finance", {});
+    const assets = Number(row.warehouseValue ?? 0) + Number(row.shopValue ?? 0) + Number(row.accountsReceivable ?? 0);
+    const liabilities = Number(row.accountsPayable ?? 0);
     return {
       period: "Current period",
       income: Number(row.revenue ?? 0),
       expenses: Number(row.expenses ?? 0),
       grossProfit: Number(row.grossProfit ?? 0),
       netProfit: Number(row.grossProfit ?? 0) - Number(row.expenses ?? 0),
-      assets: Number(row.warehouseValue ?? 0) + Number(row.shopValue ?? 0),
-      liabilities: Number(row.supplierPayments ?? 0),
-      equity: Number(row.warehouseValue ?? 0) + Number(row.shopValue ?? 0) - Number(row.supplierPayments ?? 0)
+      assets,
+      liabilities,
+      equity: assets - liabilities
     } satisfies FinancialStatement;
   },
   async reports() {
@@ -396,6 +456,7 @@ export const api = {
     customerId?: string | null;
     payment: Sale["payment"];
     lines: SaleLineInput[];
+    discount?: number;
   }) {
     return request<{ id: string; refNo: string; total: number }>("/sales", {
       method: "POST",
@@ -403,6 +464,7 @@ export const api = {
         cashierId: payload.cashierId,
         customerId: payload.customerId ?? null,
         paymentMethod: payload.payment === "voucher" ? "cash" : payload.payment,
+        discount: payload.discount ?? 0,
         items: payload.lines.map((line) => ({
           productId: line.productId,
           quantity: line.qty,
@@ -555,14 +617,17 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  createProduction(payload: { bomId: string; outletId: string; qtyProduced: number; qtyWaste: number }) {
+  createProduction(payload: { bomId: string; outletId?: string; qtyProduced: number; qtyWaste: number; extraCost?: number; sellingPrice?: number; producedBy?: string | null }) {
     return request<{ id: string; totalCost: number }>("/production", {
       method: "POST",
       body: JSON.stringify({
         blueprintId: payload.bomId,
-        quantityToProduce: payload.qtyProduced,
+        quantityToProduce: payload.qtyProduced + payload.qtyWaste,
         quantityProduced: payload.qtyProduced,
-        quantityWasted: payload.qtyWaste
+        quantityWasted: payload.qtyWaste,
+        extraCost: payload.extraCost ?? 0,
+        sellingPrice: payload.sellingPrice,
+        producedBy: payload.producedBy ?? null
       })
     });
   },

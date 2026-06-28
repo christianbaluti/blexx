@@ -359,6 +359,16 @@ const saleSchema = z.object({
   })).min(1)
 });
 
+const stockAdjustmentSchema = z.object({
+  productId: z.string().uuid().optional(),
+  itemId: z.string().uuid().optional(),
+  outletId: z.string().min(1),
+  qty: z.number().refine((value) => value !== 0, "Quantity cannot be zero"),
+  reason: z.enum(["adjust", "damage"]).default("adjust"),
+  note: nullableText,
+  userId: z.string().uuid().nullable().optional()
+}).refine((line) => Boolean(line.productId || line.itemId), "Select an item or product");
+
 const userSchema = z.object({
   username: z.string().trim().min(2),
   email: z.string().email(),
@@ -434,24 +444,67 @@ export async function registerCoreRoutes(app: FastifyInstance) {
   app.post("/backup", async () => ({ id: ref("BKP"), name: "Manual backup", createdAt: new Date().toISOString(), status: "created" }));
 
   app.get("/dashboard", async () => {
-    const result = await pool.query(`
+    const [summary, trend, topProducts] = await Promise.all([
+      pool.query(`
       select
         coalesce((select sum(total) from sales where sale_date >= now() - interval '14 days'), 0) as revenue_14d,
+        coalesce((select coalesce(sum(amount) filter (where type = 'sale_revenue'), 0) - coalesce(sum(amount) filter (where type in ('discount', 'cogs')), 0) from finance_transactions where created_at >= now() - interval '14 days'), 0) as profit_14d,
         coalesce((select sum(quantity * p.average_cost) from shop_stock ss join products p on p.id = ss.product_id), 0) as shop_value,
         coalesce((select sum(quantity * p.average_cost) from warehouse_stock ws join products p on p.id = ws.product_id), 0) +
         coalesce((select sum(quantity * i.average_cost) from warehouse_stock ws join items i on i.id = ws.item_id), 0) as warehouse_value,
         coalesce((select count(*) from sales where sale_date >= now() - interval '14 days'), 0) as sales_count,
         coalesce((select count(*) from shop_stock ss join products p on p.id = ss.product_id where ss.quantity <= p.reorder_level), 0) as low_stock_count
-    `);
-    const row = result.rows[0];
+    `),
+      pool.query(`
+        select to_char(day::date, 'Mon DD') as day, coalesce(sum(s.total), 0) as revenue
+        from generate_series(current_date - interval '13 days', current_date, interval '1 day') day
+        left join sales s on s.sale_date::date = day::date
+        group by day
+        order by day
+      `),
+      pool.query(`
+        select p.name, coalesce(ss.quantity, 0) as stock
+        from products p
+        left join shop_stock ss on ss.product_id = p.id
+        order by coalesce(ss.quantity, 0) desc, p.name
+        limit 6
+      `)
+    ]);
+    const row = summary.rows[0];
     return {
       revenue14d: money(row.revenue_14d),
+      profit14d: money(row.profit_14d),
       shopValue: money(row.shop_value),
       warehouseValue: money(row.warehouse_value),
       salesCount: Number(row.sales_count),
-      lowStockCount: Number(row.low_stock_count)
+      lowStockCount: Number(row.low_stock_count),
+      revenueTrend: trend.rows.map((entry) => ({ day: String(entry.day), revenue: money(entry.revenue) })),
+      topProducts: topProducts.rows.map((entry) => ({ name: String(entry.name), stock: numberify(entry.stock) }))
     };
   });
+
+  app.get("/notifications", async () => {
+    const lowStock = await pool.query(`
+      select p.id, p.name, coalesce(ss.quantity, 0) as quantity, p.reorder_level as "reorderLevel"
+      from products p
+      left join shop_stock ss on ss.product_id = p.id
+      where p.reorder_level > 0 and coalesce(ss.quantity, 0) <= p.reorder_level
+      order by coalesce(ss.quantity, 0), p.name
+      limit 25
+    `);
+    return lowStock.rows.map((row) => ({
+      id: `low-stock-${row.id}`,
+      ts: new Date().toISOString(),
+      type: "low_stock",
+      title: `${row.name} is low in shop stock`,
+      body: `${numberify(row.quantity)} available; reorder point is ${numberify(row.reorderLevel)}.`,
+      read: false,
+      channel: "in_app",
+      status: "pending"
+    }));
+  });
+
+  app.post("/notifications/:id/read", async () => ({ ok: true }));
 
   app.get("/stock/locations", async () => (await pool.query("select id, code, name, type, address from stock_locations order by type, name")).rows);
 
@@ -1205,9 +1258,11 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.get("/stock/movements", async () => {
     const result = await pool.query(`
-      select sm.id, coalesce(i.name, p.name) as "productName", sm.direction as movement, sm.quantity as qty,
+      select sm.id, coalesce(i.id, p.id) as "productId", coalesce(i.name, p.name) as "productName",
+             sm.location_id as "outletId", l.name as "outletName", sm.direction as movement, sm.quantity as qty,
              sm.unit_cost as "unitCost", sm.ref_type as "refType", sm.ref_id as "refId", sm.note, sm.created_at as "createdAt"
       from stock_movements sm
+      join stock_locations l on l.id = sm.location_id
       left join items i on i.id = sm.item_id
       left join products p on p.id = sm.product_id
       order by sm.created_at desc
@@ -1215,6 +1270,83 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     `);
     return result.rows.map((row) => ({ ...row, qty: numberify(row.qty), unitCost: numberify(row.unitCost) }));
   });
+
+  app.get("/stock/batches", async () => {
+    const result = await pool.query(`
+      select gi.id, gi.item_id as "productId", i.name as "productName", g.location_id as "outletId",
+             l.name as "outletName", gi.batch_no as "batchNo", gi.expiry_date as "expiryDate",
+             gi.quantity, gi.landed_unit_cost as cost
+      from grn_items gi
+      join grns g on g.id = gi.grn_id
+      join stock_locations l on l.id = g.location_id
+      join items i on i.id = gi.item_id
+      order by gi.expiry_date nulls last, gi.id desc
+      limit 200
+    `);
+    return result.rows.map((row) => ({
+      ...row,
+      quantity: numberify(row.quantity),
+      cost: numberify(row.cost)
+    }));
+  });
+
+  app.post("/inventory/adjustments", async (request) => {
+    const body = stockAdjustmentSchema.parse(request.body);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      let locationId = body.outletId;
+      let locationType: "warehouse" | "shop" = body.outletId === "shop" ? "shop" : "warehouse";
+      if (body.outletId === "warehouse" || body.outletId === "shop") {
+        locationId = await defaultLocation(body.outletId, client);
+      } else {
+        const location = await client.query("select id, type from stock_locations where id = $1", [body.outletId]);
+        if (!location.rows[0]) throw app.httpErrors.notFound("Stock location not found");
+        locationId = location.rows[0].id as string;
+        locationType = location.rows[0].type as "warehouse" | "shop";
+      }
+
+      const qty = Math.abs(body.qty);
+      const direction = body.qty > 0 ? "in" : "out";
+      const note = body.note ?? (body.reason === "damage" ? "Damaged stock adjustment" : "Manual stock adjustment");
+
+      if (body.itemId) {
+        if (locationType !== "warehouse") throw app.httpErrors.badRequest("Raw items can only be adjusted in the warehouse.");
+        if (direction === "out") await assertWarehouseItem(client, body.itemId, qty);
+        await updateWarehouseItem(client, body.itemId, direction === "in" ? qty : -qty);
+        const item = await client.query("select average_cost from items where id = $1", [body.itemId]);
+        await client.query(
+          `insert into stock_movements (location_id, item_id, direction, quantity, unit_cost, ref_type, user_id, note)
+           values ($1,$2,$3,$4,$5,'adjustment',$6,$7)`,
+          [locationId, body.itemId, direction, qty, numberify(item.rows[0]?.average_cost), body.userId ?? null, note]
+        );
+      } else if (body.productId) {
+        if (locationType === "shop") {
+          if (direction === "out") await assertShopProduct(client, body.productId, qty);
+          await updateShopProduct(client, body.productId, direction === "in" ? qty : -qty);
+        } else {
+          if (direction === "out") await assertWarehouseProduct(client, body.productId, qty);
+          await updateWarehouseProduct(client, body.productId, direction === "in" ? qty : -qty);
+        }
+        const product = await client.query("select average_cost from products where id = $1", [body.productId]);
+        await client.query(
+          `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, user_id, note)
+           values ($1,$2,$3,$4,$5,'adjustment',$6,$7)`,
+          [locationId, body.productId, direction, qty, numberify(product.rows[0]?.average_cost), body.userId ?? null, note]
+        );
+      }
+
+      await client.query("commit");
+      return { ok: true };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.get("/stock-counts", async () => []);
 
   app.post("/transfers", async (request, reply) => {
     const body = transferSchema.parse(request.body);
@@ -1247,7 +1379,10 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.get("/transfers", async () => {
     const result = await pool.query(`
-      select t.*, p.name as "productName", fl.name as "fromLocation", tl.name as "toLocation", u.full_name as "userName"
+      select t.id, t.ref_no as "refNo", t.from_location_id as "fromOutletId", t.to_location_id as "toOutletId",
+             fl.name as "fromOutletName", tl.name as "toOutletName", p.name as "productName",
+             t.quantity as "totalItems", t.transferred_at as "createdAt", t.note, u.full_name as "userName",
+             'received'::text as status
       from stock_transfers t
       join products p on p.id = t.product_id
       join stock_locations fl on fl.id = t.from_location_id
@@ -1255,7 +1390,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       left join users u on u.id = t.transferred_by
       order by t.transferred_at desc
     `);
-    return result.rows;
+    return result.rows.map((row) => ({ ...row, totalItems: numberify(row.totalItems) }));
   });
 
   app.post("/sales", async (request, reply) => {
@@ -1278,13 +1413,24 @@ export async function registerCoreRoutes(app: FastifyInstance) {
          values ($1,$2,$3,$4,$5,$6,$7) returning id, ref_no`,
         [ref("SL"), body.customerId ?? null, body.cashierId, subtotal, body.discount, total, body.paymentMethod]
       );
+      const receiptItems: Record<string, unknown>[] = [];
       for (const line of body.items) {
-        const product = await client.query("select average_cost from products where id = $1", [line.productId]);
+        const product = await client.query("select name, sku, average_cost from products where id = $1", [line.productId]);
         const unitCost = numberify(product.rows[0]?.average_cost);
+        const lineTotal = line.quantity * line.unitPrice - line.discount;
+        receiptItems.push({
+          productId: line.productId,
+          sku: product.rows[0]?.sku ?? "",
+          name: product.rows[0]?.name ?? line.productId,
+          qty: line.quantity,
+          price: line.unitPrice,
+          discount: line.discount,
+          total: lineTotal
+        });
         await client.query(
           `insert into sale_items (sale_id, product_id, quantity, unit_price, discount, unit_cost, line_total)
            values ($1,$2,$3,$4,$5,$6,$7)`,
-          [sale.rows[0].id, line.productId, line.quantity, line.unitPrice, line.discount, unitCost, line.quantity * line.unitPrice - line.discount]
+          [sale.rows[0].id, line.productId, line.quantity, line.unitPrice, line.discount, unitCost, lineTotal]
         );
         await updateShopProduct(client, line.productId, -line.quantity);
         await client.query(
@@ -1293,11 +1439,13 @@ export async function registerCoreRoutes(app: FastifyInstance) {
           [shopId, line.productId, line.quantity, unitCost, sale.rows[0].id, body.cashierId]
         );
       }
-      await client.query("insert into payments (party_type, customer_id, sale_id, method, amount) values ('customer',$1,$2,$3,$4)", [body.customerId ?? null, sale.rows[0].id, body.paymentMethod, total]);
+      if (body.paymentMethod !== "credit") {
+        await client.query("insert into payments (party_type, customer_id, sale_id, method, amount) values ('customer',$1,$2,$3,$4)", [body.customerId ?? null, sale.rows[0].id, body.paymentMethod, total]);
+      }
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale',$1,$2,'POS sale')", [sale.rows[0].id, total]);
       if (body.discount) await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('discount','sale',$1,$2,'Sale discount')", [sale.rows[0].id, body.discount]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale',$1,$2,'Cost of goods sold')", [sale.rows[0].id, cogs]);
-      const receiptPayload = { refNo: sale.rows[0].ref_no, items: body.items, subtotal, discount: body.discount, total, paymentMethod: body.paymentMethod };
+      const receiptPayload = { refNo: sale.rows[0].ref_no, customerId: body.customerId ?? null, items: receiptItems, subtotal, discount: body.discount, total, paymentMethod: body.paymentMethod };
       const receipt = await client.query("insert into receipts (sale_id, receipt_no, payload) values ($1,$2,$3) returning id, receipt_no", [sale.rows[0].id, ref("RCPT"), JSON.stringify(receiptPayload)]);
       await client.query("commit");
       return reply.code(201).send({ id: sale.rows[0].id, refNo: sale.rows[0].ref_no, receiptId: receipt.rows[0].id, receiptNo: receipt.rows[0].receipt_no, total: money(total) });
@@ -1310,25 +1458,75 @@ export async function registerCoreRoutes(app: FastifyInstance) {
   });
 
   app.get("/sales", async () => {
-    const result = await pool.query("select s.*, c.name as customer_name from sales s left join customers c on c.id = s.customer_id order by s.sale_date desc limit 100");
-    return result.rows;
+    const result = await pool.query(`
+      select s.*, s.ref_no as "refNo", s.sale_date as date, s.cashier_id as "cashierId",
+             s.customer_id as "customerId", c.name as "customerName", s.payment_method as payment
+      from sales s
+      left join customers c on c.id = s.customer_id
+      order by s.sale_date desc
+      limit 100
+    `);
+    return result.rows.map((row) => ({
+      ...row,
+      subtotal: money(row.subtotal),
+      discount: money(row.discount),
+      total: money(row.total),
+      tax: 0
+    }));
   });
 
   app.get("/receipts", async () => {
     const result = await pool.query(`
-      select r.id, r.receipt_no as "receiptNo", r.payload, r.created_at as "createdAt", s.ref_no as "saleRefNo", s.total
-      from receipts r join sales s on s.id = r.sale_id order by r.created_at desc limit 100
+      select r.id, r.receipt_no as "receiptNo", r.payload, r.created_at as "createdAt",
+             s.id as "saleId", s.ref_no as "saleRefNo", s.total, s.payment_method as payment,
+             c.name as "customerName"
+      from receipts r
+      join sales s on s.id = r.sale_id
+      left join customers c on c.id = s.customer_id
+      order by r.created_at desc
+      limit 100
     `);
-    return result.rows.map((row) => ({ ...row, total: money(row.total) }));
+    return result.rows.map((row) => {
+      const payload = row.payload as { items?: unknown[]; subtotal?: number; discount?: number; paymentMethod?: string } | null;
+      return {
+        ...row,
+        refNo: row.receiptNo,
+        lineCount: Array.isArray(payload?.items) ? payload.items.length : 0,
+        subtotal: money(payload?.subtotal ?? row.total),
+        discount: money(payload?.discount ?? 0),
+        total: money(row.total),
+        payment: payload?.paymentMethod ?? row.payment,
+        status: "completed"
+      };
+    });
+  });
+
+  app.get("/receipts/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const result = await pool.query(`
+      select r.id, r.receipt_no as "receiptNo", r.payload, r.created_at as "createdAt",
+             s.id as "saleId", s.ref_no as "saleRefNo", s.total, s.payment_method as payment,
+             c.name as "customerName"
+      from receipts r
+      join sales s on s.id = r.sale_id
+      left join customers c on c.id = s.customer_id
+      where r.id = $1
+    `, [id]);
+    const row = result.rows[0];
+    if (!row) throw app.httpErrors.notFound("Receipt not found");
+    return { ...row, total: money(row.total) };
   });
 
   app.get("/customers", async () => {
     const result = await pool.query(`
-      select c.*, coalesce(sum(s.total), 0) as "totalPurchases", coalesce(count(s.id), 0) as "saleCount"
-      from customers c left join sales s on s.customer_id = c.id
-      group by c.id order by c.name
+      select c.*, coalesce(sum(s.total), 0) as "totalPurchases", coalesce(count(distinct s.id), 0) as "saleCount",
+             greatest(0, coalesce(sum(s.total), 0) - coalesce((select sum(p.amount) from payments p where p.customer_id = c.id), 0)) as balance
+      from customers c
+      left join sales s on s.customer_id = c.id
+      group by c.id
+      order by c.name
     `);
-    return result.rows.map((row) => ({ ...row, totalPurchases: money(row.totalPurchases), saleCount: Number(row.saleCount) }));
+    return result.rows.map((row) => ({ ...row, totalPurchases: money(row.totalPurchases), balance: money(row.balance), saleCount: Number(row.saleCount) }));
   });
 
   app.post("/customers", async (request, reply) => {
@@ -1393,6 +1591,9 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         coalesce(sum(amount) filter (where type = 'cogs'), 0) as cogs,
         coalesce(sum(amount) filter (where type in ('supplier_invoice','purchase_expense','production_cost')), 0) as expenses,
         coalesce(sum(amount) filter (where type = 'supplier_payment'), 0) as supplier_payments,
+        coalesce((select sum(total - paid) from supplier_invoices where status <> 'void'), 0) as accounts_payable,
+        coalesce((select sum(s.total) from sales s where s.customer_id is not null), 0) -
+        coalesce((select sum(p.amount) from payments p where p.customer_id is not null), 0) as accounts_receivable,
         coalesce((select sum(quantity * i.average_cost) from warehouse_stock ws join items i on i.id = ws.item_id), 0) +
         coalesce((select sum(quantity * p.average_cost) from warehouse_stock ws join products p on p.id = ws.product_id), 0) as warehouse_value,
         coalesce((select sum(quantity * p.average_cost) from shop_stock ss join products p on p.id = ss.product_id), 0) as shop_value
@@ -1409,6 +1610,8 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       grossProfit: money(revenue - discounts - cogs),
       expenses: money(row.expenses),
       supplierPayments: money(row.supplier_payments),
+      accountsPayable: money(row.accounts_payable),
+      accountsReceivable: money(row.accounts_receivable),
       warehouseValue: money(row.warehouse_value),
       shopValue: money(row.shop_value)
     };
@@ -1433,11 +1636,11 @@ export async function registerCoreRoutes(app: FastifyInstance) {
   app.get("/users", async () => (await pool.query("select id, username, email, full_name as name, role, status, last_login_at as \"lastLoginAt\" from users order by created_at desc")).rows);
 
   app.get("/roles", async () => [
-    { id: "super_admin", label: "Administrator" },
-    { id: "inventory_officer", label: "Inventory officer" },
-    { id: "production_officer", label: "Production officer" },
-    { id: "pos_cashier", label: "POS cashier" },
-    { id: "finance_user", label: "Finance user" }
+    { id: "super_admin", label: "Administrator", permissions: [{ id: "all", label: "Full system access" }] },
+    { id: "inventory_officer", label: "Inventory officer", permissions: [{ id: "inventory", label: "Inventory" }, { id: "purchasing", label: "Purchasing" }, { id: "transfers", label: "Transfers" }] },
+    { id: "production_officer", label: "Production officer", permissions: [{ id: "blueprints", label: "Product blueprints" }, { id: "production", label: "Production" }, { id: "warehouse", label: "Warehouse stock" }] },
+    { id: "pos_cashier", label: "POS cashier", permissions: [{ id: "pos", label: "POS sales" }, { id: "receipts", label: "Receipts" }, { id: "customers", label: "Customers" }] },
+    { id: "finance_user", label: "Finance user", permissions: [{ id: "finance", label: "Finance" }, { id: "reports", label: "Reports" }, { id: "supplier_invoices", label: "Supplier invoices" }] }
   ]);
 
   app.post("/users", async (request, reply) => {
@@ -1447,7 +1650,33 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       "insert into users (username, email, full_name, password_hash, role) values ($1,$2,$3,$4,$5) returning id",
       [body.username, body.email, body.name, passwordHash, body.role]
     );
-    return reply.code(201).send({ id: result.rows[0].id });
+    let inviteSent = false;
+    if (config.smtpHost && config.smtpUser && config.smtpPass) {
+      try {
+        const settingsResult = await pool.query("select value from app_settings where key = 'settings'");
+        const settings = settingsResult.rows[0]?.value as { downloads?: { androidUrl?: string; iosUrl?: string }; company?: { tradingName?: string } } | undefined;
+        await mailTransport().sendMail({
+          from: config.smtpFrom,
+          to: body.email,
+          subject: `Your ${settings?.company?.tradingName ?? "POS & Inventory +"} account`,
+          text: [
+            `Hello ${body.name},`,
+            "",
+            "Your account has been created.",
+            `Username: ${body.username}`,
+            `Email: ${body.email}`,
+            `Temporary password: ${body.password}`,
+            "",
+            `Android: ${settings?.downloads?.androidUrl ?? ""}`,
+            `iOS: ${settings?.downloads?.iosUrl ?? ""}`
+          ].join("\n")
+        });
+        inviteSent = true;
+      } catch {
+        inviteSent = false;
+      }
+    }
+    return reply.code(201).send({ id: result.rows[0].id, inviteSent });
   });
 
   app.patch("/users/:id", async (request) => {

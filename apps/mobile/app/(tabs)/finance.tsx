@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { formatMwk } from "@blex/shared";
 import { EmptyPanel, MetricCard, PageHeader, TabBar, TableCard, TableHeader } from "../../src/components/feature-ui";
+import { ExportMenu } from "../../src/components/export-menu";
 import { Card, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
@@ -22,11 +23,26 @@ export default function Finance() {
   const revenue = sales.reduce((sum, sale) => sum + sale.total, 0);
   const totalExpenses = expenses.reduce((sum, expense) => sum + expense.amount, 0);
   const profit = revenue - totalExpenses;
+  const exportRows = useMemo(() => {
+    if (tab === "ar") return customers.map((customer) => ({ customer: customer.name, balance: customer.balance, creditLimit: customer.creditLimit, status: customer.status ?? "" }));
+    if (tab === "ap") return suppliers.map((supplier) => ({ supplier: supplier.name, balance: supplier.balance, status: supplier.status ?? "" }));
+    if (tab === "ledger") return ledger.map((entry) => ({ postedAt: entry.postedAt, account: entry.accountName, memo: entry.memo ?? entry.refType ?? "", debit: entry.debit, credit: entry.credit }));
+    if (tab === "pnl") return [
+      { line: "Sales revenue", amount: revenue || statements?.income || 0 },
+      { line: "Operating expenses", amount: -(totalExpenses || statements?.expenses || 0) },
+      { line: "Net result", amount: profit || statements?.netProfit || 0 }
+    ];
+    return [
+      { line: "Assets", amount: statements?.assets ?? ar },
+      { line: "Liabilities", amount: statements?.liabilities ?? ap },
+      { line: "Equity", amount: statements?.equity ?? ar - ap }
+    ];
+  }, [ap, ar, customers, expenses, ledger, profit, revenue, statements, suppliers, tab, totalExpenses]);
 
   return (
     <Screen>
       <ScrollView contentContainerStyle={styles.content}>
-        <PageHeader eyebrow="Finance" title="Books" description="Accounts receivable, payable, ledgers and financial statements." />
+        <PageHeader eyebrow="Finance" title="Books" description="Accounts receivable, payable, ledgers and financial statements." actions={<ExportMenu title={`finance-${tab}`} rows={exportRows} />} />
         <View style={styles.metrics}>
           <MetricCard label="Revenue" value={formatMwk(revenue)} tone="accent" icon="chart-line" />
           <MetricCard label="Expenses" value={formatMwk(totalExpenses)} tone="danger" icon="receipt-text-outline" />

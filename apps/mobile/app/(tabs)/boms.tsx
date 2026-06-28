@@ -7,14 +7,15 @@ import { Button, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
 
+type ComponentRow = { key: string; itemId: string; quantity: string };
+
 export default function Boms() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [productId, setProductId] = useState("");
-  const [materialId, setMaterialId] = useState("");
   const [name, setName] = useState("");
   const [outputQty, setOutputQty] = useState("1");
-  const [componentQty, setComponentQty] = useState("1");
+  const [components, setComponents] = useState<ComponentRow[]>([]);
   const [laborCost, setLaborCost] = useState("0");
   const [overhead, setOverhead] = useState("0");
   const { data: boms = [] } = useQuery({ queryKey: ["boms"], queryFn: api.boms });
@@ -28,7 +29,9 @@ export default function Boms() {
       outputQty: Number(outputQty || 1),
       laborCost: Number(laborCost || 0),
       overheadCost: Number(overhead || 0),
-      items: [{ itemId: materialId, quantity: Number(componentQty || 1) }]
+      items: components
+        .filter((component) => component.itemId && Number(component.quantity || 0) > 0)
+        .map((component) => ({ itemId: component.itemId, quantity: Number(component.quantity || 0) }))
     }),
     onSuccess: async () => {
       setOpen(false);
@@ -38,13 +41,24 @@ export default function Boms() {
 
   function openNew() {
     setProductId(products.find((product) => product.isSellable)?.id ?? products[0]?.id ?? "");
-    setMaterialId(String(items[0]?.id ?? ""));
     setName("");
     setOutputQty("1");
-    setComponentQty("1");
+    setComponents([{ key: String(Date.now()), itemId: String(items[0]?.id ?? ""), quantity: "1" }]);
     setLaborCost("0");
     setOverhead("0");
     setOpen(true);
+  }
+
+  function updateComponent(key: string, patch: Partial<ComponentRow>) {
+    setComponents((current) => current.map((component) => component.key === key ? { ...component, ...patch } : component));
+  }
+
+  function addComponent() {
+    setComponents((current) => [...current, { key: `${Date.now()}-${current.length}`, itemId: String(items[0]?.id ?? ""), quantity: "1" }]);
+  }
+
+  function removeComponent(key: string) {
+    setComponents((current) => current.length <= 1 ? current : current.filter((component) => component.key !== key));
   }
 
   return (
@@ -84,8 +98,30 @@ export default function Boms() {
             <Field value={name} onChangeText={setName} placeholder="BOM name" />
             <PickerRail label="Finished product" items={products.map((product) => ({ id: product.id, name: product.name }))} value={productId} onChange={setProductId} />
             <Field value={outputQty} onChangeText={setOutputQty} keyboardType="numeric" placeholder="Expected output quantity" />
-            <PickerRail label="Raw material component" items={items.map((item) => ({ id: String(item.id), name: String(item.name) }))} value={materialId} onChange={setMaterialId} />
-            <Field value={componentQty} onChangeText={setComponentQty} keyboardType="numeric" placeholder="Material quantity per output" />
+            <View style={styles.componentsBlock}>
+              <View style={styles.componentsHeader}>
+                <Text style={styles.sectionLabel}>Raw material components</Text>
+                <Pressable style={styles.smallAdd} onPress={addComponent}>
+                  <Text style={styles.smallAddText}>Add item</Text>
+                </Pressable>
+              </View>
+              {components.map((component, index) => (
+                <View key={component.key} style={styles.componentEditor}>
+                  <PickerRail
+                    label={`Component ${index + 1}`}
+                    items={items.map((item) => ({ id: String(item.id), name: String(item.name) }))}
+                    value={component.itemId}
+                    onChange={(itemId) => updateComponent(component.key, { itemId })}
+                  />
+                  <View style={styles.componentQtyRow}>
+                    <Field style={{ flex: 1 }} value={component.quantity} onChangeText={(quantity) => updateComponent(component.key, { quantity })} keyboardType="numeric" placeholder="Quantity per output" />
+                    <Pressable style={styles.removeButton} onPress={() => removeComponent(component.key)}>
+                      <Text style={styles.removeText}>Remove</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+            </View>
             <View style={styles.grid}>
               <Field style={styles.gridField} value={laborCost} onChangeText={setLaborCost} keyboardType="numeric" placeholder="Labour cost" />
               <Field style={styles.gridField} value={overhead} onChangeText={setOverhead} keyboardType="numeric" placeholder="Overhead cost" />
@@ -93,7 +129,7 @@ export default function Boms() {
             {create.error ? <Text style={styles.error}>{create.error instanceof Error ? create.error.message : "BOM failed"}</Text> : null}
             <View style={styles.actions}>
               <Button variant="outline" onPress={() => setOpen(false)}>Cancel</Button>
-              <Button onPress={() => create.mutate()} disabled={!name.trim() || !productId || !materialId || productId === materialId || create.isPending}>Save BOM</Button>
+              <Button onPress={() => create.mutate()} disabled={!name.trim() || !productId || !components.some((component) => component.itemId && Number(component.quantity || 0) > 0) || create.isPending}>Save BOM</Button>
             </View>
           </Pressable>
         </Pressable>
@@ -130,6 +166,14 @@ const styles = StyleSheet.create({
   panel: { width: "100%", maxWidth: 620, gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },
   modalTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 23, fontWeight: "700" },
   sectionLabel: { color: colors.muted, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
+  componentsBlock: { gap: 10, borderWidth: 1, borderColor: colors.line, borderRadius: 7, padding: 10, backgroundColor: colors.surfaceAlt },
+  componentsHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  smallAdd: { minHeight: 30, justifyContent: "center", borderRadius: 6, backgroundColor: colors.accent, paddingHorizontal: 10 },
+  smallAddText: { color: "#FFF7EF", fontSize: 12, fontWeight: "900" },
+  componentEditor: { gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, paddingTop: 10 },
+  componentQtyRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  removeButton: { minHeight: 40, justifyContent: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 7, paddingHorizontal: 10 },
+  removeText: { color: colors.danger, fontSize: 12, fontWeight: "900" },
   optionRail: { gap: 8 },
   optionChip: { minHeight: 34, justifyContent: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 7, backgroundColor: colors.surface, paddingHorizontal: 11 },
   optionChipActive: { backgroundColor: colors.sidebar, borderColor: colors.sidebar },

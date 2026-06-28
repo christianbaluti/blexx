@@ -2,7 +2,8 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { formatMwk } from "@blex/shared";
-import { CommandButton, PageHeader } from "../../src/components/feature-ui";
+import { PageHeader } from "../../src/components/feature-ui";
+import { ExportMenu } from "../../src/components/export-menu";
 import { Card, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
 import { colors, typography } from "../../src/lib/theme";
@@ -22,6 +23,12 @@ export default function Reports() {
     const match = reports.find((report) => report.title.toLowerCase().includes(item.title.split(" ")[0].toLowerCase()));
     return { ...item, total: match?.total, trend: match?.trend };
   });
+  const exportRows = cards.map((report) => ({
+    report: report.title,
+    description: report.description,
+    total: report.total ?? "",
+    trend: report.trend ?? ""
+  }));
 
   return (
     <Screen>
@@ -30,7 +37,7 @@ export default function Reports() {
           eyebrow="Insights"
           title="Reports & analytics"
           description="Exportable views over sales, inventory, finance, customers, suppliers, audit and production."
-          actions={<CommandButton icon="download-outline" label="Export pack" primary />}
+          actions={<ExportMenu title="reports-pack" rows={exportRows} />}
         />
         <View style={styles.grid}>
           {cards.map((report) => (
