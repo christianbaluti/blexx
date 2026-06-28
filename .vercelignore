@@ -17,6 +17,8 @@ builds/**
 
 apps/mobile/dist
 apps/mobile/dist/**
+!api/dist
+!api/dist/**
 apps/mobile/android
 apps/mobile/android/**
 apps/mobile/ios

@@ -7,6 +7,7 @@
       "use": "@vercel/node",
       "config": {
         "includeFiles": [
+          "api/dist/**",
           "apps/api/dist/**",
           "packages/shared/dist/**"
         ]
