@@ -1,13 +1,11 @@
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-
-const apiDist = join(process.cwd(), "api", "dist");
 
 const entries = [
   {
     dir: join(process.cwd(), "api"),
     filename: "index.mjs",
-    contents: `import { handleVercelRequest } from "./dist/vercel.js";\n\nexport default handleVercelRequest;\n`
+    contents: `import { handleVercelRequest } from "../apps/api/dist/vercel.js";\n\nexport default handleVercelRequest;\n`
   },
   {
     dir: join(process.cwd(), "api"),
@@ -25,9 +23,6 @@ const entries = [
     contents: `import Fastify from "fastify";\nimport { createApp } from "../dist/app.js";\n\nFastify;\n\nconst fastify = await createApp();\nfastify.listen({ port: Number(process.env.PORT ?? 3000) });\n`
   }
 ];
-
-await rm(apiDist, { recursive: true, force: true });
-await cp(join(process.cwd(), "apps", "api", "dist"), apiDist, { recursive: true });
 
 for (const entry of entries) {
   await mkdir(entry.dir, { recursive: true });
