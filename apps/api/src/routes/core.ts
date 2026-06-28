@@ -267,11 +267,19 @@ const grnSchema = z.object({
   note: nullableText,
   createInvoice: z.boolean().default(false),
   invoiceDueDate: nullableText,
+  invoiceExtraCosts: z.array(z.object({
+    description: z.string().trim().min(1),
+    amount: z.number().nonnegative()
+  })).default([]),
   items: z.array(z.object({
-    itemId: z.string().uuid(),
+    purchaseOrderItemId: z.string().uuid().nullable().optional(),
+    itemId: z.string().uuid().nullable().optional(),
+    name: z.string().trim().min(1).optional(),
+    unit: z.string().trim().default("ea"),
     quantity: z.number().positive(),
-    unitCost: z.number().nonnegative()
-  })).min(1)
+    unitCost: z.number().nonnegative(),
+    expiryDate: nullableText
+  }).refine((line) => Boolean(line.itemId || line.name || line.purchaseOrderItemId), "Select an item or create a new one")).min(1)
 });
 
 const invoiceSchema = z.object({
@@ -652,17 +660,20 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       ),
       pool.query(
         `select poi.id, poi.quantity, poi.unit_cost as "unitCost", poi.line_total as "lineTotal",
+                coalesce(sum(gi.quantity), 0) as "receivedQty",
                 i.id as "itemId", i.sku, i.name, i.unit
          from purchase_order_items poi
          join items i on i.id = poi.item_id
+         left join grn_items gi on gi.purchase_order_item_id = poi.id
          where poi.purchase_order_id = $1
+         group by poi.id, i.id
          order by poi.id`,
         [id]
       )
     ]);
     const row = purchaseOrder.rows[0];
     if (!row) throw app.httpErrors.notFound("Purchase order not found");
-    return { ...row, subtotal: money(row.subtotal), landedCost: money(row.landed_cost), total: money(row.total), items: lines.rows.map((line) => ({ ...line, quantity: numberify(line.quantity), unitCost: money(line.unitCost), lineTotal: money(line.lineTotal) })) };
+    return { ...row, subtotal: money(row.subtotal), landedCost: money(row.landed_cost), total: money(row.total), items: lines.rows.map((line) => ({ ...line, quantity: numberify(line.quantity), receivedQty: numberify(line.receivedQty), remainingQty: Math.max(0, numberify(line.quantity) - numberify(line.receivedQty)), unitCost: money(line.unitCost), lineTotal: money(line.lineTotal) })) };
   });
 
   async function purchaseOrderPdfPayload(id: string) {
@@ -739,41 +750,103 @@ export async function registerCoreRoutes(app: FastifyInstance) {
   app.post("/grns", async (request, reply) => {
     const body = grnSchema.parse(request.body);
     const locationId = body.locationId ?? await defaultLocation("warehouse");
-    const total = body.items.reduce((sum, line) => sum + line.quantity * line.unitCost, 0);
+    const extraCostTotal = body.invoiceExtraCosts.reduce((sum, cost) => sum + cost.amount, 0);
+    const goodsTotal = body.items.reduce((sum, line) => sum + line.quantity * line.unitCost, 0);
+    const invoiceTotal = goodsTotal + extraCostTotal;
     const client = await pool.connect();
     try {
       await client.query("begin");
       const grn = await client.query(
         `insert into grns (ref_no, purchase_order_id, supplier_id, location_id, received_by, note, total)
          values ($1,$2,$3,$4,$5,$6,$7) returning id, ref_no`,
-        [ref("GRN"), body.purchaseOrderId ?? null, body.supplierId, locationId, body.receivedBy ?? null, body.note ?? null, total]
+        [ref("GRN"), body.purchaseOrderId ?? null, body.supplierId, locationId, body.receivedBy ?? null, body.note ?? null, invoiceTotal]
       );
+      const grnId = grn.rows[0].id as string;
+      const grnRef = grn.rows[0].ref_no as string;
+      let lineIndex = 0;
       for (const line of body.items) {
+        lineIndex += 1;
+        let itemId = line.itemId ?? undefined;
+        let unitCost = line.unitCost;
+        let purchaseOrderItemId = line.purchaseOrderItemId ?? null;
+
+        if (body.purchaseOrderId && purchaseOrderItemId) {
+          const poLine = await client.query(
+            `select poi.id, poi.item_id, poi.quantity, poi.unit_cost, coalesce(sum(gi.quantity), 0) as received
+             from purchase_order_items poi
+             left join grn_items gi on gi.purchase_order_item_id = poi.id
+             where poi.id = $1 and poi.purchase_order_id = $2
+             group by poi.id`,
+            [purchaseOrderItemId, body.purchaseOrderId]
+          );
+          const source = poLine.rows[0];
+          if (!source) throw app.httpErrors.badRequest("Selected PO item does not belong to this purchase order.");
+          const remaining = numberify(source.quantity) - numberify(source.received);
+          if (line.quantity > remaining) throw app.httpErrors.badRequest(`Received quantity is greater than remaining PO quantity. Remaining: ${remaining}`);
+          itemId = source.item_id as string;
+          unitCost = line.unitCost || numberify(source.unit_cost);
+        }
+
+        if (!itemId) {
+          const existing = await client.query("select id from items where lower(name) = lower($1) and unit = $2 limit 1", [line.name, line.unit]);
+          itemId = existing.rows[0]?.id as string | undefined;
+        }
+        if (!itemId) {
+          const item = await client.query(
+            `insert into items (sku, name, unit, reorder_level) values ($1,$2,$3,0) returning id`,
+            [ref("ITM"), line.name, line.unit]
+          );
+          itemId = item.rows[0].id as string;
+        }
+
+        const lineTotal = line.quantity * unitCost;
+        const landedUnitCost = goodsTotal > 0 ? unitCost + ((lineTotal / goodsTotal) * extraCostTotal / line.quantity) : unitCost;
+        const batchNo = `${grnRef}-${String(lineIndex).padStart(2, "0")}`;
         await client.query(
-          `insert into grn_items (grn_id, item_id, quantity, unit_cost, landed_unit_cost, line_total)
-           values ($1,$2,$3,$4,$4,$5)`,
-          [grn.rows[0].id, line.itemId, line.quantity, line.unitCost, line.quantity * line.unitCost]
+          `insert into grn_items (grn_id, purchase_order_item_id, item_id, quantity, unit_cost, landed_unit_cost, line_total, batch_no, expiry_date)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [grnId, purchaseOrderItemId, itemId, line.quantity, unitCost, landedUnitCost, lineTotal, batchNo, line.expiryDate ?? null]
         );
-        await updateWarehouseItem(client, line.itemId, line.quantity);
-        await client.query("update items set average_cost = $2, updated_at = now() where id = $1", [line.itemId, line.unitCost]);
+        await updateWarehouseItem(client, itemId, line.quantity);
+        await client.query("update items set average_cost = $2, updated_at = now() where id = $1", [itemId, landedUnitCost]);
         await client.query(
           `insert into stock_movements (location_id, item_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
            values ($1,$2,'in',$3,$4,'grn',$5,$6,'Goods received')`,
-          [locationId, line.itemId, line.quantity, line.unitCost, grn.rows[0].id, body.receivedBy ?? null]
+          [locationId, itemId, line.quantity, landedUnitCost, grnId, body.receivedBy ?? null]
         );
       }
-      if (body.purchaseOrderId) await client.query("update purchase_orders set status = 'received' where id = $1", [body.purchaseOrderId]);
+      if (body.purchaseOrderId) {
+        const progress = await client.query(
+          `select bool_and(received >= quantity) as complete, bool_or(received > 0) as started
+           from (
+             select poi.quantity, coalesce(sum(gi.quantity), 0) as received
+             from purchase_order_items poi
+             left join grn_items gi on gi.purchase_order_item_id = poi.id
+             where poi.purchase_order_id = $1
+             group by poi.id
+           ) lines`,
+          [body.purchaseOrderId]
+        );
+        const complete = Boolean(progress.rows[0]?.complete);
+        const started = Boolean(progress.rows[0]?.started);
+        await client.query("update purchase_orders set status = $2 where id = $1", [body.purchaseOrderId, complete ? "received" : started ? "partial" : "ordered"]);
+      }
       if (body.createInvoice) {
         const invoice = await client.query(
           `insert into supplier_invoices (ref_no, supplier_id, purchase_order_id, grn_id, due_date, total, note)
            values ($1,$2,$3,$4,$5,$6,'from grn') returning id`,
-          [ref("SI"), body.supplierId, body.purchaseOrderId ?? null, grn.rows[0].id, body.invoiceDueDate ?? null, total]
+          [ref("SI"), body.supplierId, body.purchaseOrderId ?? null, grnId, body.invoiceDueDate ?? null, invoiceTotal]
         );
-        await client.query("insert into expenses (supplier_invoice_id, category, description, amount) values ($1,'supplier_invoice','Supplier invoice from GRN',$2)", [invoice.rows[0].id, total]);
-        await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_invoice','supplier_invoice',$1,$2,'Supplier invoice from GRN')", [invoice.rows[0].id, total]);
+        await client.query("insert into expenses (supplier_invoice_id, category, description, amount) values ($1,'supplier_invoice','Supplier invoice from GRN goods',$2)", [invoice.rows[0].id, goodsTotal]);
+        for (const cost of body.invoiceExtraCosts) {
+          if (cost.amount > 0) {
+            await client.query("insert into expenses (supplier_invoice_id, category, description, amount) values ($1,'purchase_expense',$2,$3)", [invoice.rows[0].id, cost.description, cost.amount]);
+          }
+        }
+        await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_invoice','supplier_invoice',$1,$2,'Supplier invoice from GRN')", [invoice.rows[0].id, invoiceTotal]);
       }
       await client.query("commit");
-      return reply.code(201).send({ id: grn.rows[0].id, refNo: grn.rows[0].ref_no });
+      return reply.code(201).send({ id: grnId, refNo: grnRef });
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -784,20 +857,42 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.get("/grns", async () => {
     const result = await pool.query(`
-      select g.*, s.name as "supplierName", l.name as "locationName", coalesce(count(gi.id), 0) as "lineCount"
+      select g.id, g.ref_no as "refNo", g.purchase_order_id as "poId", po.ref_no as "poRefNo",
+             g.supplier_id as "supplierId", s.name as "supplierName",
+             g.location_id as "locationId", l.name as "locationName", l.type as "locationType",
+             g.received_at as "receivedAt", g.received_by as "receivedBy", g.note, g.total,
+             coalesce(count(gi.id), 0) as "totalItems"
       from grns g join suppliers s on s.id = g.supplier_id join stock_locations l on l.id = g.location_id
       left join grn_items gi on gi.grn_id = g.id
-      group by g.id, s.name, l.name
+      left join purchase_orders po on po.id = g.purchase_order_id
+      group by g.id, po.ref_no, s.name, l.name, l.type
       order by g.received_at desc
     `);
-    return result.rows.map((row) => ({ ...row, total: money(row.total), lineCount: Number(row.lineCount) }));
+    return result.rows.map((row) => ({ ...row, outletId: row.locationId, outletName: row.locationName, total: money(row.total), totalItems: Number(row.totalItems) }));
   });
 
   app.get("/grns/:id", async (request) => {
     const { id } = idParam.parse(request.params);
     const [grn, items] = await Promise.all([
-      pool.query("select g.*, s.name as supplier_name from grns g join suppliers s on s.id = g.supplier_id where g.id = $1", [id]),
-      pool.query("select gi.*, i.name as item_name, i.sku from grn_items gi join items i on i.id = gi.item_id where gi.grn_id = $1", [id])
+      pool.query(
+        `select g.*, g.ref_no as "refNo", po.ref_no as "poRefNo", s.name as supplier_name, s.name as "supplierName", l.name as "locationName", l.type as "locationType"
+         from grns g
+         join suppliers s on s.id = g.supplier_id
+         join stock_locations l on l.id = g.location_id
+         left join purchase_orders po on po.id = g.purchase_order_id
+         where g.id = $1`,
+        [id]
+      ),
+      pool.query(
+        `select gi.*, gi.batch_no as "batchNo", gi.expiry_date as "expiryDate", gi.unit_cost as "unitCost", gi.line_total as "lineTotal",
+                i.name as item_name, i.name as "itemName", i.sku, i.unit, poi.quantity as "orderedQty"
+         from grn_items gi
+         join items i on i.id = gi.item_id
+         left join purchase_order_items poi on poi.id = gi.purchase_order_item_id
+         where gi.grn_id = $1
+         order by gi.id`,
+        [id]
+      )
     ]);
     if (!grn.rows[0]) throw app.httpErrors.notFound("GRN not found");
     return { ...grn.rows[0], items: items.rows };

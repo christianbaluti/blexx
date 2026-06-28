@@ -272,7 +272,25 @@ export const api = {
     }));
   },
   production: () => cached<ProductionBatch[]>("production", "/production", []),
-  grn: () => cached<GoodsReceivedNote[]>("grn", "/grns", []),
+  async grn() {
+    const rows = await cached<Record<string, unknown>[]>("grn", "/grns", []);
+    return rows.map((row) => ({
+      id: String(row.id),
+      refNo: String(row.refNo ?? row.ref_no),
+      poId: row.poId || row.purchase_order_id ? String(row.poId ?? row.purchase_order_id) : null,
+      poRefNo: row.poRefNo ? String(row.poRefNo) : null,
+      supplierId: row.supplierId || row.supplier_id ? String(row.supplierId ?? row.supplier_id) : null,
+      supplierName: row.supplierName ? String(row.supplierName) : null,
+      outletId: row.outletId || row.locationId ? String(row.outletId ?? row.locationId) : null,
+      outletName: row.outletName || row.locationName ? String(row.outletName ?? row.locationName) : null,
+      locationType: row.locationType ? String(row.locationType) : null,
+      receivedAt: String(row.receivedAt ?? row.received_at),
+      receivedBy: row.receivedBy || row.received_by ? String(row.receivedBy ?? row.received_by) : null,
+      totalItems: Number(row.totalItems ?? row.lineCount ?? 0),
+      total: Number(row.total ?? 0),
+      note: row.note ? String(row.note) : null
+    })) as GoodsReceivedNote[];
+  },
   supplierInvoices: () => cached<SupplierInvoice[]>("supplier-invoices", "/supplier-invoices", []),
   loyalty: () => cached<Record<string, unknown>[]>("loyalty", "/loyalty", []),
   credit: () => cached<Record<string, unknown>[]>("credit", "/credit", []),

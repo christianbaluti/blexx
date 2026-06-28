@@ -160,10 +160,11 @@ export interface Sale {
 
 export interface PurchaseOrder {
   id: Id;
+  refNo?: string;
   supplierId: Id;
   supplierName?: string;
   date: string;
-  status: "draft" | "ordered" | "received" | "cancelled";
+  status: "draft" | "ordered" | "partial" | "received" | "cancelled";
   total: number;
 }
 
@@ -171,6 +172,7 @@ export interface GoodsReceivedNote {
   id: Id;
   refNo: string;
   poId: Id | null;
+  poRefNo?: string | null;
   supplierId?: Id | null;
   supplierName?: string | null;
   outletId?: Id | null;

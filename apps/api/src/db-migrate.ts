@@ -19,6 +19,7 @@ async function runMigrations() {
   await runSql(join(root, "migrations", "004_admin_completion.sql"));
   await runSql(join(root, "migrations", "005_people_workflows.sql"));
   await runSql(join(root, "migrations", "006_core_reset.sql"));
+  await runSql(join(root, "migrations", "007_grn_receiving_flow.sql"));
 }
 
 function getDatabaseParts() {
