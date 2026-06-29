@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { Product } from "@blex/shared";
 import { formatMwk } from "@blex/shared";
@@ -19,6 +19,8 @@ export default function Inventory() {
   const [productId, setProductId] = useState("");
   const [outletId, setOutletId] = useState("");
   const [stockOutletId, setStockOutletId] = useState("all");
+  const [selectedCountId, setSelectedCountId] = useState<string | null>(null);
+  const [countDraft, setCountDraft] = useState<Record<string, string>>({});
   const [qty, setQty] = useState("");
   const [note, setNote] = useState("");
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.products });
@@ -28,6 +30,11 @@ export default function Inventory() {
   const { data: movements = [], isLoading: loadingMovements, isFetching: fetchingMovements } = useQuery({ queryKey: ["inventory-movements"], queryFn: api.movements });
   const { data: transfers = [], isLoading: loadingTransfers, isFetching: fetchingTransfers } = useQuery({ queryKey: ["transfers"], queryFn: api.transfers });
   const { data: counts = [], isLoading: loadingCounts, isFetching: fetchingCounts } = useQuery({ queryKey: ["stock-counts"], queryFn: api.stockCounts });
+  const { data: selectedCount, isFetching: fetchingCountDetail } = useQuery({
+    queryKey: ["stock-count", selectedCountId],
+    queryFn: () => api.stockCountDetail(String(selectedCountId)),
+    enabled: Boolean(selectedCountId)
+  });
   const lowStock = products.filter((product) => product.stock <= product.reorder);
   const stockRows = inventory.filter((row) => stockOutletId === "all" || String(row.outletId) === stockOutletId);
   const lowOutletStock = stockRows.filter((row) => Number(row.quantity ?? 0) <= Number(row.reorder ?? 0));
@@ -66,6 +73,80 @@ export default function Inventory() {
     }
   });
 
+  const startCount = useMutation({
+    mutationFn: () => api.createStockCount({ outletId: stockOutletId === "all" ? "warehouse" : stockOutletId }),
+    onSuccess: async (created) => {
+      setTab("counts");
+      setSelectedCountId(created.id);
+      await queryClient.invalidateQueries({ queryKey: ["stock-counts"] });
+    }
+  });
+
+  const saveCount = useMutation({
+    mutationFn: () => {
+      if (!selectedCount) throw new Error("No stock count selected.");
+      return api.updateStockCount(selectedCount.id, {
+        lines: selectedCount.lines.map((line) => ({
+          id: line.id,
+          countedQty: Number(countDraft[line.id] ?? line.countedQty ?? line.expectedQty)
+        }))
+      });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["stock-counts"] }),
+        queryClient.invalidateQueries({ queryKey: ["stock-count", selectedCountId] })
+      ]);
+    }
+  });
+
+  const submitCount = useMutation({
+    mutationFn: async () => {
+      if (!selectedCount) throw new Error("No stock count selected.");
+      await saveCount.mutateAsync();
+      return api.submitStockCount(selectedCount.id);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["stock-counts"] }),
+        queryClient.invalidateQueries({ queryKey: ["stock-count", selectedCountId] })
+      ]);
+    }
+  });
+
+  const closeCount = useMutation({
+    mutationFn: async () => {
+      if (!selectedCount) throw new Error("No stock count selected.");
+      return api.closeStockCount(selectedCount.id);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["stock-counts"] }),
+        queryClient.invalidateQueries({ queryKey: ["inventory"] }),
+        queryClient.invalidateQueries({ queryKey: ["inventory-movements"] }),
+        queryClient.invalidateQueries({ queryKey: ["products"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] })
+      ]);
+      setSelectedCountId(null);
+    }
+  });
+
+  const cancelCount = useMutation({
+    mutationFn: () => {
+      if (!selectedCount) throw new Error("No stock count selected.");
+      return api.cancelStockCount(selectedCount.id);
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["stock-counts"] });
+      setSelectedCountId(null);
+    }
+  });
+
+  useEffect(() => {
+    if (!selectedCount) return;
+    setCountDraft(Object.fromEntries(selectedCount.lines.map((line) => [line.id, String(line.countedQty ?? line.expectedQty)])));
+  }, [selectedCount]);
+
   function openAdjustment(nextReason: "adjust" | "damage" = "adjust", product?: Product) {
     setReason(nextReason);
     setProductId(product?.id ?? products[0]?.id ?? "");
@@ -84,6 +165,7 @@ export default function Inventory() {
           description="Stock items, batches, adjustments, transfers and counts across all outlets."
           actions={
             <>
+              <CommandButton icon="clipboard-check-outline" label={startCount.isPending ? "Starting..." : "Start count"} onPress={() => startCount.mutate()} />
               <CommandButton icon="clipboard-edit-outline" label="Adjustment" onPress={() => openAdjustment("damage")} />
               <CommandButton icon="plus" label="Receive stock" primary onPress={() => openAdjustment("adjust")} />
             </>
@@ -214,16 +296,16 @@ export default function Inventory() {
               <TableHeader columns={["Outlet", "Status", "Variance", "Created", "Closed"]} />
               {activeLoading ? <LoadingRow label="Loading counts..." /> : null}
               {counts.map((count) => (
-                <View key={count.id} style={styles.row}>
+                <Pressable key={count.id} style={styles.row} onPress={() => setSelectedCountId(count.id)}>
                   <Text style={styles.cellText}>{count.outletName}</Text>
                   <View style={styles.cell}><Badge tone={count.status === "closed" ? "success" : "warning"}>{count.status}</Badge></View>
                   <Text style={[styles.rightCell, count.variance < 0 && { color: colors.danger }]}>{count.variance}</Text>
                   <Text style={styles.mutedText}>{new Date(count.createdAt).toLocaleString()}</Text>
                   <Text style={styles.mutedText}>{count.closedAt ? new Date(count.closedAt).toLocaleString() : "-"}</Text>
-                </View>
+                </Pressable>
               ))}
             </TableCard>
-          ) : <EmptyPanel icon="clipboard-check-outline" title="No physical counts yet" body="Run stock counts to reconcile system stock with shelf stock." action={<CommandButton icon="plus" label="New count" primary />} />
+          ) : <EmptyPanel icon="clipboard-check-outline" title="No physical counts yet" body="Run stock counts to reconcile system stock with shelf stock." action={<CommandButton icon="plus" label="New count" primary onPress={() => startCount.mutate()} />} />
         ) : null}
 
         {!inventory.length && tab === "stock" && lowStock.length ? <Text style={styles.hint}>Outlet-level inventory is empty; product master stock is still available in Products.</Text> : null}
@@ -275,6 +357,62 @@ export default function Inventory() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      <Modal visible={Boolean(selectedCountId)} transparent animationType="fade" onRequestClose={() => setSelectedCountId(null)}>
+        <Pressable style={styles.backdrop} onPress={() => setSelectedCountId(null)}>
+          <Pressable style={styles.countPanel}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.modalTitle}>Physical count</Text>
+                <Text style={styles.summaryText}>{selectedCount?.outletName ?? "Loading location"} {selectedCount?.status ? `- ${selectedCount.status}` : ""}</Text>
+              </View>
+              {fetchingCountDetail ? <ActivityIndicator color={colors.accent} /> : null}
+            </View>
+            <ScrollView style={styles.countList} contentContainerStyle={{ gap: 8 }}>
+              {selectedCount?.lines.map((line) => {
+                const counted = Number(countDraft[line.id] ?? line.countedQty ?? line.expectedQty);
+                const variance = counted - line.expectedQty;
+                return (
+                  <View key={line.id} style={styles.countLine}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.rowTitle}>{line.name}</Text>
+                      <Text style={styles.rowMeta}>Expected {line.expectedQty} {line.unit} {variance ? `- variance ${variance}` : ""}</Text>
+                    </View>
+                    <Field
+                      value={countDraft[line.id] ?? ""}
+                      onChangeText={(value) => setCountDraft((current) => ({ ...current, [line.id]: value.replace(/[^0-9.]/g, "") }))}
+                      keyboardType="numeric"
+                      editable={selectedCount.status === "open"}
+                      placeholder="Counted"
+                      style={styles.countField}
+                    />
+                  </View>
+                );
+              })}
+              {!selectedCount && !fetchingCountDetail ? <Text style={styles.error}>Stock count could not be loaded.</Text> : null}
+            </ScrollView>
+            {saveCount.error || submitCount.error || closeCount.error || cancelCount.error ? (
+              <Text style={styles.error}>{(saveCount.error ?? submitCount.error ?? closeCount.error ?? cancelCount.error) instanceof Error ? (saveCount.error ?? submitCount.error ?? closeCount.error ?? cancelCount.error)?.message : "Stock count action failed"}</Text>
+            ) : null}
+            <View style={styles.modalActions}>
+              <Button variant="outline" onPress={() => setSelectedCountId(null)}>Close</Button>
+              {selectedCount?.status === "open" ? (
+                <>
+                  <Button variant="outline" onPress={() => saveCount.mutate()} disabled={saveCount.isPending}>{saveCount.isPending ? "Saving..." : "Save"}</Button>
+                  <Button variant="outline" onPress={() => cancelCount.mutate()} disabled={cancelCount.isPending}>Cancel count</Button>
+                  <Button onPress={() => submitCount.mutate()} disabled={submitCount.isPending}>{submitCount.isPending ? "Submitting..." : "Submit"}</Button>
+                </>
+              ) : null}
+              {selectedCount?.status === "submitted" ? (
+                <>
+                  <Button variant="outline" onPress={() => cancelCount.mutate()} disabled={cancelCount.isPending}>Cancel count</Button>
+                  <Button onPress={() => closeCount.mutate()} disabled={closeCount.isPending}>{closeCount.isPending ? "Closing..." : "Approve close"}</Button>
+                </>
+              ) : null}
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </Screen>
   );
 }
@@ -300,6 +438,8 @@ const styles = StyleSheet.create({
   hint: { color: colors.muted, textAlign: "center", fontSize: 12 },
   backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },
   panel: { width: "100%", maxWidth: 520, gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },
+  countPanel: { width: "100%", maxWidth: 680, maxHeight: "92%", gap: 12, borderRadius: 8, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 16 },
+  modalHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
   modalTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 23, fontWeight: "700" },
   sectionLabel: { color: colors.muted, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
   optionRail: { gap: 8, paddingVertical: 1 },
@@ -313,6 +453,9 @@ const styles = StyleSheet.create({
   reasonText: { color: colors.ink, fontWeight: "900" },
   reasonTextActive: { color: "#FFF7EF" },
   summaryText: { color: colors.muted, fontSize: 12 },
+  countList: { maxHeight: 460 },
+  countLine: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingVertical: 10 },
+  countField: { width: 110, minWidth: 110, textAlign: "right" },
   error: { color: colors.danger, fontWeight: "800" },
-  modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 }
+  modalActions: { flexDirection: "row", justifyContent: "flex-end", flexWrap: "wrap", gap: 8 }
 });

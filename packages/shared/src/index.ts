@@ -120,10 +120,27 @@ export interface StockCount {
   id: Id;
   outletId: Id;
   outletName: string;
-  status: "open" | "submitted" | "closed";
+  status: "open" | "submitted" | "closed" | "cancelled";
   createdAt: string;
   closedAt: string | null;
   variance: number;
+}
+
+export interface StockCountLine {
+  id: Id;
+  itemId: Id | null;
+  productId: Id | null;
+  name: string;
+  sku: string | null;
+  unit: string;
+  expectedQty: number;
+  countedQty: number | null;
+  varianceQty: number;
+}
+
+export interface StockCountDetail extends StockCount {
+  locationType: "warehouse" | "shop";
+  lines: StockCountLine[];
 }
 
 export interface Transfer {
@@ -201,6 +218,42 @@ export interface SupplierInvoice {
   attachmentData?: string | null;
 }
 
+export interface CustomerInvoice {
+  id: Id;
+  invoiceNo: string;
+  saleId: Id;
+  saleRefNo: string;
+  customerId: Id | null;
+  customerName: string;
+  invoiceDate: string;
+  dueDate: string | null;
+  subtotal: number;
+  discount: number;
+  tax: number;
+  total: number;
+  paid: number;
+  balance: number;
+  status: "open" | "partial" | "paid" | "void";
+}
+
+export interface SupplierReturn {
+  id: Id;
+  refNo: string;
+  supplierId: Id;
+  supplierName: string;
+  grnId: Id | null;
+  grnRefNo?: string | null;
+  supplierInvoiceId?: Id | null;
+  supplierInvoiceRefNo?: string | null;
+  reason: string;
+  subtotal: number;
+  tax: number;
+  total: number;
+  status: "open" | "partial" | "paid" | "void" | "completed";
+  createdAt: string;
+  lineCount?: number;
+}
+
 export interface Bom {
   id: Id;
   productId: Id;
@@ -275,6 +328,7 @@ export interface FinancialStatement {
   assets: number;
   liabilities: number;
   equity: number;
+  taxPayable?: number;
 }
 
 export interface ReportSummary {

@@ -14,18 +14,28 @@ export default function Finance() {
   const [tab, setTab] = useState<FinanceTab>("ar");
   const { data: customers = [] } = useQuery({ queryKey: ["customers"], queryFn: api.customers });
   const { data: suppliers = [] } = useQuery({ queryKey: ["suppliers"], queryFn: api.suppliers });
+  const { data: customerInvoices = [] } = useQuery({ queryKey: ["customer-invoices"], queryFn: api.customerInvoices });
+  const { data: supplierInvoices = [] } = useQuery({ queryKey: ["supplier-invoices"], queryFn: api.supplierInvoices });
+  const { data: supplierReturns = [] } = useQuery({ queryKey: ["supplier-returns"], queryFn: api.supplierReturns });
   const { data: sales = [] } = useQuery({ queryKey: ["sales"], queryFn: api.sales });
   const { data: expenses = [] } = useQuery({ queryKey: ["expenses"], queryFn: api.expenses });
   const { data: ledger = [] } = useQuery({ queryKey: ["ledger"], queryFn: api.ledger });
   const { data: statements } = useQuery({ queryKey: ["statements"], queryFn: api.statements });
-  const ar = customers.reduce((sum, customer) => sum + customer.balance, 0);
-  const ap = suppliers.reduce((sum, supplier) => sum + supplier.balance, 0);
+  const ar = customerInvoices.length ? customerInvoices.reduce((sum, invoice) => sum + invoice.balance, 0) : customers.reduce((sum, customer) => sum + customer.balance, 0);
+  const supplierInvoiceBalance = supplierInvoices.reduce((sum, invoice) => sum + Math.max(0, invoice.total - invoice.paid), 0);
+  const supplierReturnCredits = supplierReturns.reduce((sum, row) => sum + row.total, 0);
+  const ap = supplierInvoices.length ? Math.max(0, supplierInvoiceBalance - supplierReturnCredits) : suppliers.reduce((sum, supplier) => sum + supplier.balance, 0);
   const revenue = sales.reduce((sum, sale) => sum + sale.total, 0);
   const totalExpenses = expenses.reduce((sum, expense) => sum + expense.amount, 0);
   const profit = revenue - totalExpenses;
   const exportRows = useMemo(() => {
-    if (tab === "ar") return customers.map((customer) => ({ customer: customer.name, balance: customer.balance, creditLimit: customer.creditLimit, status: customer.status ?? "" }));
-    if (tab === "ap") return suppliers.map((supplier) => ({ supplier: supplier.name, balance: supplier.balance, status: supplier.status ?? "" }));
+    if (tab === "ar") return customerInvoices.length
+      ? customerInvoices.map((invoice) => ({ invoice: invoice.invoiceNo, customer: invoice.customerName, total: invoice.total, paid: invoice.paid, balance: invoice.balance, status: invoice.status }))
+      : customers.map((customer) => ({ customer: customer.name, balance: customer.balance, creditLimit: customer.creditLimit, status: customer.status ?? "" }));
+    if (tab === "ap") return [
+      ...supplierInvoices.map((invoice) => ({ type: "invoice", ref: invoice.refNo, supplier: invoice.supplierName, total: invoice.total, paid: invoice.paid, balance: Math.max(0, invoice.total - invoice.paid), status: invoice.status })),
+      ...supplierReturns.map((row) => ({ type: "debit note", ref: row.refNo, supplier: row.supplierName, total: -row.total, paid: 0, balance: -row.total, status: row.status }))
+    ];
     if (tab === "ledger") return ledger.map((entry) => ({ postedAt: entry.postedAt, account: entry.accountName, memo: entry.memo ?? entry.refType ?? "", debit: entry.debit, credit: entry.credit }));
     if (tab === "pnl") return [
       { line: "Sales revenue", amount: revenue || statements?.income || 0 },
@@ -37,7 +47,7 @@ export default function Finance() {
       { line: "Liabilities", amount: statements?.liabilities ?? ap },
       { line: "Equity", amount: statements?.equity ?? ar - ap }
     ];
-  }, [ap, ar, customers, expenses, ledger, profit, revenue, statements, suppliers, tab, totalExpenses]);
+  }, [ap, ar, customerInvoices, customers, expenses, ledger, profit, revenue, statements, supplierInvoices, supplierReturns, suppliers, tab, totalExpenses]);
 
   return (
     <Screen>
@@ -63,26 +73,77 @@ export default function Finance() {
 
         {tab === "ar" ? (
           <TableCard>
-            <TableHeader columns={["Customer", "Balance", "Credit limit"]} />
-            {customers.filter((customer) => customer.balance > 0).map((customer) => (
-              <View key={customer.id} style={styles.row}>
-                <Text style={styles.cellText}>{customer.name}</Text>
-                <Text style={[styles.rightCell, { color: colors.danger }]}>{formatMwk(customer.balance)}</Text>
-                <Text style={styles.rightCell}>{formatMwk(customer.creditLimit)}</Text>
-              </View>
-            ))}
+            {customerInvoices.length ? (
+              <>
+                <TableHeader columns={["Invoice", "Customer", "Status", "Total", "Paid", "Balance"]} />
+                {customerInvoices.map((invoice) => (
+                  <View key={invoice.id} style={styles.row}>
+                    <Text style={styles.cellText}>{invoice.invoiceNo}</Text>
+                    <Text style={styles.cellText}>{invoice.customerName}</Text>
+                    <Text style={styles.mutedText}>{invoice.status}</Text>
+                    <Text style={styles.rightCell}>{formatMwk(invoice.total)}</Text>
+                    <Text style={styles.rightCell}>{formatMwk(invoice.paid)}</Text>
+                    <Text style={[styles.rightCell, invoice.balance > 0 && { color: colors.danger }]}>{formatMwk(invoice.balance)}</Text>
+                  </View>
+                ))}
+              </>
+            ) : (
+              <>
+                <TableHeader columns={["Customer", "Balance", "Credit limit"]} />
+                {customers.filter((customer) => customer.balance > 0).map((customer) => (
+                  <View key={customer.id} style={styles.row}>
+                    <Text style={styles.cellText}>{customer.name}</Text>
+                    <Text style={[styles.rightCell, { color: colors.danger }]}>{formatMwk(customer.balance)}</Text>
+                    <Text style={styles.rightCell}>{formatMwk(customer.creditLimit)}</Text>
+                  </View>
+                ))}
+              </>
+            )}
           </TableCard>
         ) : null}
 
         {tab === "ap" ? (
           <TableCard>
-            <TableHeader columns={["Supplier", "Balance"]} />
-            {suppliers.filter((supplier) => supplier.balance > 0).map((supplier) => (
-              <View key={supplier.id} style={styles.row}>
-                <Text style={styles.cellText}>{supplier.name}</Text>
-                <Text style={[styles.rightCell, { color: colors.accent }]}>{formatMwk(supplier.balance)}</Text>
-              </View>
-            ))}
+            {supplierInvoices.length || supplierReturns.length ? (
+              <>
+                <TableHeader columns={["Type", "Reference", "Supplier", "Status", "Total", "Paid/Credit", "Balance"]} />
+                {supplierInvoices.map((invoice) => {
+                  const balance = Math.max(0, invoice.total - invoice.paid);
+                  return (
+                    <View key={invoice.id} style={styles.row}>
+                      <Text style={styles.mutedText}>Invoice</Text>
+                      <Text style={styles.cellText}>{invoice.refNo}</Text>
+                      <Text style={styles.cellText}>{invoice.supplierName}</Text>
+                      <Text style={styles.mutedText}>{invoice.status}</Text>
+                      <Text style={styles.rightCell}>{formatMwk(invoice.total)}</Text>
+                      <Text style={styles.rightCell}>{formatMwk(invoice.paid)}</Text>
+                      <Text style={[styles.rightCell, balance > 0 && { color: colors.accent }]}>{formatMwk(balance)}</Text>
+                    </View>
+                  );
+                })}
+                {supplierReturns.map((row) => (
+                  <View key={row.id} style={styles.row}>
+                    <Text style={styles.mutedText}>Debit note</Text>
+                    <Text style={styles.cellText}>{row.refNo}</Text>
+                    <Text style={styles.cellText}>{row.supplierName}</Text>
+                    <Text style={styles.mutedText}>{row.status}</Text>
+                    <Text style={styles.rightCell}>{formatMwk(row.total)}</Text>
+                    <Text style={[styles.rightCell, { color: colors.success }]}>{formatMwk(row.total)}</Text>
+                    <Text style={[styles.rightCell, { color: colors.success }]}>({formatMwk(row.total)})</Text>
+                  </View>
+                ))}
+              </>
+            ) : (
+              <>
+                <TableHeader columns={["Supplier", "Balance"]} />
+                {suppliers.filter((supplier) => supplier.balance > 0).map((supplier) => (
+                  <View key={supplier.id} style={styles.row}>
+                    <Text style={styles.cellText}>{supplier.name}</Text>
+                    <Text style={[styles.rightCell, { color: colors.accent }]}>{formatMwk(supplier.balance)}</Text>
+                  </View>
+                ))}
+              </>
+            )}
           </TableCard>
         ) : null}
 
@@ -108,7 +169,7 @@ export default function Finance() {
             <Text style={styles.statementTitle}>Profit and Loss</Text>
             <Text style={styles.statementSub}>{statements?.period ?? "Current period"}</Text>
             <Line label="Sales revenue" value={revenue || statements?.income || 0} />
-            <Line label="VAT collected" value={-Math.round((revenue * 0.165) / 1.165)} muted />
+            <Line label="Tax payable" value={-(statements?.taxPayable ?? 0)} muted />
             <Line label="Operating expenses" value={-(totalExpenses || statements?.expenses || 0)} />
             <View style={styles.statementTotal}><Text style={styles.statementTotalLabel}>Net result</Text><Text style={[styles.statementTotalValue, profit < 0 && { color: colors.danger }]}>{formatMwk(profit || statements?.netProfit || 0)}</Text></View>
           </Card>
@@ -120,6 +181,7 @@ export default function Finance() {
             <Text style={styles.statementSub}>{statements?.period ?? "Current period"}</Text>
             <Line label="Assets" value={statements?.assets ?? ar} />
             <Line label="Liabilities" value={statements?.liabilities ?? ap} />
+            <Line label="Tax payable" value={-(statements?.taxPayable ?? 0)} muted />
             <View style={styles.statementTotal}><Text style={styles.statementTotalLabel}>Equity</Text><Text style={styles.statementTotalValue}>{formatMwk(statements?.equity ?? ar - ap)}</Text></View>
           </Card>
         ) : null}

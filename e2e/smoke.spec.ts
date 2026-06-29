@@ -56,4 +56,20 @@ test.describe("authenticated core module smoke", () => {
     await expect(page.getByPlaceholder(/Scan barcode or search/i)).toBeVisible();
     await expect(page.getByText(/Checkout|Cart|Payment/i).first()).toBeVisible();
   });
+
+  test("exposes physical stock count controls", async ({ page }) => {
+    await page.goto("/inventory");
+    await expect(page.getByText(/Physical counts/i)).toBeVisible();
+    await expect(page.getByText(/Start count|New count/i).first()).toBeVisible();
+  });
+
+  test("shows ledger-backed tax and invoice finance views", async ({ page }) => {
+    await page.goto("/finance");
+    await page.getByText(/P&L/i).click();
+    await expect(page.getByText(/Tax payable/i).first()).toBeVisible();
+    await page.getByText(/Receivable/i).click();
+    await expect(page.getByText(/Customer|Invoice|Balance/i).first()).toBeVisible();
+    await page.getByText(/Payable/i).click();
+    await expect(page.getByText(/Supplier|Reference|Balance/i).first()).toBeVisible();
+  });
 });

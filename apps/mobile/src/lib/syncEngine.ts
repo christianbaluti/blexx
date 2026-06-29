@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import type { SyncHealth, SyncMutation } from "@blex/shared";
 import { api } from "./api";
-import { getDeviceId, getDeviceIdAsync, listOutboxAsync, markOutboxConflicted, markOutboxFailed, markOutboxSynced, outboxCounts } from "./localDb";
+import { getDeviceId, getDeviceIdAsync, listOutboxAsync, markOutboxConflicted, markOutboxFailed, markOutboxSynced, outboxCounts, saveCache } from "./localDb";
 import { useNetworkStatus } from "./network";
 
 export function useSyncEngine() {
@@ -15,8 +15,9 @@ export function useSyncEngine() {
   const sync = useMutation({
     mutationFn: async () => {
       const mutations = await listOutboxAsync();
-      if (!mutations.length) return { accepted: 0, conflicts: [] };
-      const result = await api.pushSync({ deviceId: await getDeviceIdAsync(), mutations });
+      const result = mutations.length
+        ? await api.pushSync({ deviceId: await getDeviceIdAsync(), mutations })
+        : { accepted: 0, acceptedIds: [], conflicts: [] };
       const acceptedIds = result.acceptedIds ?? [];
       const conflictIds = result.conflicts.map((conflict) => conflict.entityId).filter(Boolean);
       const unresolvedIds = mutations
@@ -25,6 +26,11 @@ export function useSyncEngine() {
       markOutboxSynced(acceptedIds);
       markOutboxConflicted(conflictIds);
       markOutboxFailed(unresolvedIds);
+      const pulled = await api.pullSync();
+      saveCache("sync-pull", pulled);
+      saveCache("customers", pulled.customers);
+      saveCache("products", pulled.products);
+      saveCache("shop-stock", pulled.shopStock);
       return result;
     },
     onSuccess: async () => {

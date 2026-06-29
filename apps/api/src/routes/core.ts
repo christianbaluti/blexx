@@ -45,6 +45,16 @@ function paymentAssetAccount(method?: string | null) {
   return method === "cash" ? "cash" : "bank";
 }
 
+function normalizedTaxRate(value: unknown) {
+  const rate = Number(value ?? 0);
+  if (!Number.isFinite(rate) || rate <= 0) return 0;
+  return Math.min(rate, 100);
+}
+
+function taxOn(value: number, rate: number) {
+  return money(value * (normalizedTaxRate(rate) / 100));
+}
+
 async function journalAccountId(client: DbClient, systemKey: string) {
   const result = await client.query("select id from chart_accounts where system_key = $1 and status = 'active'", [systemKey]);
   const accountId = result.rows[0]?.id;
@@ -553,6 +563,19 @@ const returnSchema = z.object({
   })).min(1)
 });
 
+const supplierReturnSchema = z.object({
+  supplierId: z.string().uuid(),
+  grnId: z.string().uuid().nullable().optional(),
+  supplierInvoiceId: z.string().uuid().nullable().optional(),
+  reason: z.string().trim().min(1),
+  items: z.array(z.object({
+    itemId: z.string().uuid().optional(),
+    productId: z.string().uuid().optional(),
+    quantity: z.number().positive(),
+    unitCost: z.number().nonnegative()
+  }).refine((line) => Boolean(line.itemId || line.productId), "Select an item or product")).min(1)
+});
+
 const syncPushSchema = z.object({
   deviceId: z.string().trim().min(1),
   mutations: z.array(z.object({
@@ -746,7 +769,11 @@ export async function registerCoreRoutes(app: FastifyInstance) {
             subtotal += line.quantity * line.unitPrice - line.discount;
             cogs += line.quantity * numberify(product.rows[0]?.average_cost);
           }
-          const total = Math.max(0, subtotal - normalized.discount);
+          const settings = await loadSettings();
+          const taxRate = normalizedTaxRate(settings.company.vatRate);
+          const taxableTotal = Math.max(0, subtotal - normalized.discount);
+          const tax = taxOn(taxableTotal, taxRate);
+          const total = money(taxableTotal + tax);
           if (normalized.paymentMethod === "credit") {
             if (!normalized.customerId) throw app.httpErrors.badRequest("Credit sales require a customer.");
             const credit = await client.query(`
@@ -760,9 +787,9 @@ export async function registerCoreRoutes(app: FastifyInstance) {
             if (remaining < total) throw app.httpErrors.badRequest(`Customer credit limit exceeded. Available credit: ${formatMoney(remaining)}`);
           }
           const sale = await client.query(
-            `insert into sales (ref_no, customer_id, cashier_id, subtotal, discount, total, payment_method)
-             values ($1,$2,$3,$4,$5,$6,$7) returning id`,
-            [ref("SL"), normalized.customerId ?? null, userId, subtotal, normalized.discount, total, normalized.paymentMethod]
+            `insert into sales (ref_no, customer_id, cashier_id, subtotal, discount, tax, tax_rate, total, payment_method)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id`,
+            [ref("SL"), normalized.customerId ?? null, userId, subtotal, normalized.discount, tax, taxRate, total, normalized.paymentMethod]
           );
           for (const line of normalized.items) {
             const product = await client.query("select average_cost from products where id = $1", [line.productId]);
@@ -782,6 +809,12 @@ export async function registerCoreRoutes(app: FastifyInstance) {
           if (normalized.paymentMethod !== "credit") {
             await client.query("insert into payments (party_type, customer_id, sale_id, method, amount) values ('customer',$1,$2,$3,$4)", [normalized.customerId ?? null, sale.rows[0].id, normalized.paymentMethod, total]);
           }
+          await client.query(
+            `insert into customer_invoices (invoice_no, sale_id, customer_id, subtotal, discount, tax, total, paid, status)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9::document_status)
+             on conflict (sale_id) do nothing`,
+            [ref("CINV"), sale.rows[0].id, normalized.customerId ?? null, subtotal, normalized.discount, tax, total, normalized.paymentMethod === "credit" ? 0 : total, normalized.paymentMethod === "credit" ? "open" : "paid"]
+          );
           await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale',$1,$2,'Offline POS sale')", [sale.rows[0].id, total]);
           await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale',$1,$2,'Offline COGS')", [sale.rows[0].id, cogs]);
           await postJournal(client, {
@@ -792,7 +825,8 @@ export async function registerCoreRoutes(app: FastifyInstance) {
             lines: [
               { account: normalized.paymentMethod === "credit" ? "accounts_receivable" : paymentAssetAccount(normalized.paymentMethod), debit: total },
               ...(normalized.discount ? [{ account: "discounts", debit: normalized.discount, memo: "Sale discount" }] : []),
-              { account: "sales_revenue", credit: total + normalized.discount },
+              { account: "sales_revenue", credit: subtotal },
+              { account: "tax_payable", credit: tax },
               { account: "cogs", debit: cogs },
               { account: "inventory_finished", credit: cogs }
             ]
@@ -2519,7 +2553,11 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         subtotal += line.quantity * line.unitPrice - line.discount;
         cogs += line.quantity * numberify(product.rows[0]?.average_cost);
       }
-      const total = Math.max(0, subtotal - body.discount);
+      const settings = await loadSettings();
+      const taxRate = normalizedTaxRate(settings.company.vatRate);
+      const taxableTotal = Math.max(0, subtotal - body.discount);
+      const tax = taxOn(taxableTotal, taxRate);
+      const total = money(taxableTotal + tax);
       if (body.paymentMethod === "credit") {
         if (!body.customerId) throw app.httpErrors.badRequest("Credit sales require a customer.");
         const credit = await client.query(`
@@ -2533,9 +2571,9 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         if (remaining < total) throw app.httpErrors.badRequest(`Customer credit limit exceeded. Available credit: ${formatMoney(remaining)}`);
       }
       const sale = await client.query(
-        `insert into sales (ref_no, customer_id, cashier_id, subtotal, discount, total, payment_method)
-         values ($1,$2,$3,$4,$5,$6,$7) returning id, ref_no`,
-        [ref("SL"), body.customerId ?? null, userId, subtotal, body.discount, total, body.paymentMethod]
+        `insert into sales (ref_no, customer_id, cashier_id, subtotal, discount, tax, tax_rate, total, payment_method)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id, ref_no`,
+        [ref("SL"), body.customerId ?? null, userId, subtotal, body.discount, tax, taxRate, total, body.paymentMethod]
       );
       const receiptItems: Record<string, unknown>[] = [];
       for (const line of body.items) {
@@ -2566,6 +2604,12 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       if (body.paymentMethod !== "credit") {
         await client.query("insert into payments (party_type, customer_id, sale_id, method, amount) values ('customer',$1,$2,$3,$4)", [body.customerId ?? null, sale.rows[0].id, body.paymentMethod, total]);
       }
+      await client.query(
+        `insert into customer_invoices (invoice_no, sale_id, customer_id, subtotal, discount, tax, total, paid, status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9::document_status)
+         on conflict (sale_id) do nothing`,
+        [ref("CINV"), sale.rows[0].id, body.customerId ?? null, subtotal, body.discount, tax, total, body.paymentMethod === "credit" ? 0 : total, body.paymentMethod === "credit" ? "open" : "paid"]
+      );
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale',$1,$2,'POS sale')", [sale.rows[0].id, total]);
       if (body.discount) await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('discount','sale',$1,$2,'Sale discount')", [sale.rows[0].id, body.discount]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale',$1,$2,'Cost of goods sold')", [sale.rows[0].id, cogs]);
@@ -2577,12 +2621,13 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         lines: [
           { account: body.paymentMethod === "credit" ? "accounts_receivable" : paymentAssetAccount(body.paymentMethod), debit: total },
           ...(body.discount ? [{ account: "discounts", debit: body.discount, memo: "Sale discount" }] : []),
-          { account: "sales_revenue", credit: total + body.discount },
+          { account: "sales_revenue", credit: subtotal },
+          { account: "tax_payable", credit: tax },
           { account: "cogs", debit: cogs },
           { account: "inventory_finished", credit: cogs }
         ]
       });
-      const receiptPayload = { refNo: sale.rows[0].ref_no, customerId: body.customerId ?? null, items: receiptItems, subtotal, discount: body.discount, total, paymentMethod: body.paymentMethod };
+      const receiptPayload = { refNo: sale.rows[0].ref_no, customerId: body.customerId ?? null, items: receiptItems, subtotal, discount: body.discount, tax, taxRate, total, paymentMethod: body.paymentMethod };
       const receipt = await client.query("insert into receipts (sale_id, receipt_no, payload) values ($1,$2,$3) returning id, receipt_no", [sale.rows[0].id, ref("RCPT"), JSON.stringify(receiptPayload)]);
       await client.query("commit");
       return reply.code(201).send({ id: sale.rows[0].id, refNo: sale.rows[0].ref_no, receiptId: receipt.rows[0].id, receiptNo: receipt.rows[0].receipt_no, total: money(total) });
@@ -2608,7 +2653,10 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       subtotal: money(row.subtotal),
       discount: money(row.discount),
       total: money(row.total),
-      tax: 0
+      tax: money(row.tax),
+      taxRate: numberify(row.tax_rate),
+      payment: row.payment,
+      status: row.status
     }));
   });
 
@@ -2616,6 +2664,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     const result = await pool.query(`
       select r.id, r.receipt_no as "receiptNo", r.payload, r.created_at as "createdAt",
              s.id as "saleId", s.ref_no as "saleRefNo", s.total, s.payment_method as payment,
+             s.subtotal, s.discount, s.tax, s.tax_rate as "taxRate", s.status,
              c.name as "customerName"
       from receipts r
       join sales s on s.id = r.sale_id
@@ -2624,16 +2673,18 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       limit 100
     `);
     return result.rows.map((row) => {
-      const payload = row.payload as { items?: unknown[]; subtotal?: number; discount?: number; paymentMethod?: string } | null;
+      const payload = row.payload as { items?: unknown[]; subtotal?: number; discount?: number; tax?: number; taxRate?: number; paymentMethod?: string } | null;
       return {
         ...row,
         refNo: row.receiptNo,
         lineCount: Array.isArray(payload?.items) ? payload.items.length : 0,
-        subtotal: money(payload?.subtotal ?? row.total),
-        discount: money(payload?.discount ?? 0),
+        subtotal: money(payload?.subtotal ?? row.subtotal),
+        discount: money(payload?.discount ?? row.discount),
+        tax: money(payload?.tax ?? row.tax),
+        taxRate: numberify(payload?.taxRate ?? row.taxRate),
         total: money(row.total),
         payment: payload?.paymentMethod ?? row.payment,
-        status: "completed"
+        status: row.status
       };
     });
   });
@@ -2643,6 +2694,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     const result = await pool.query(`
       select r.id, r.receipt_no as "receiptNo", r.payload, r.created_at as "createdAt",
              s.id as "saleId", s.ref_no as "saleRefNo", s.total, s.payment_method as payment,
+             s.subtotal, s.discount, s.tax, s.tax_rate as "taxRate", s.status,
              c.name as "customerName"
       from receipts r
       join sales s on s.id = r.sale_id
@@ -2651,14 +2703,14 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     `, [id]);
     const row = result.rows[0];
     if (!row) throw app.httpErrors.notFound("Receipt not found");
-    return { ...row, total: money(row.total) };
+    return { ...row, subtotal: money(row.subtotal), discount: money(row.discount), tax: money(row.tax), taxRate: numberify(row.taxRate), total: money(row.total) };
   });
 
   app.get("/returns", async () => {
     const result = await pool.query(`
       select r.id, r.ref_no as "refNo", r.sale_id as "saleId", s.ref_no as "saleRefNo",
              c.name as "customerName", r.reason, r.refund_method as "refundMethod",
-             r.subtotal, r.total, r.status, r.created_at as "createdAt",
+             r.subtotal, r.tax, r.tax_rate as "taxRate", r.total, r.status, r.created_at as "createdAt",
              coalesce(count(ri.id), 0) as "lineCount"
       from returns r
       join sales s on s.id = r.sale_id
@@ -2668,7 +2720,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       order by r.created_at desc
       limit 100
     `);
-    return result.rows.map((row) => ({ ...row, subtotal: money(row.subtotal), total: money(row.total), lineCount: Number(row.lineCount) }));
+    return result.rows.map((row) => ({ ...row, subtotal: money(row.subtotal), tax: money(row.tax), taxRate: numberify(row.taxRate), total: money(row.total), lineCount: Number(row.lineCount) }));
   });
 
   app.post("/returns", async (request, reply) => {
@@ -2724,8 +2776,11 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         );
       }
 
-      await client.query("update returns set subtotal = $2, total = $3 where id = $1", [returnId, subtotal, subtotal]);
-      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','return',$1,$2,$3)", [returnId, -subtotal, "Sale return"]);
+      const taxRate = normalizedTaxRate(saleRow.tax_rate);
+      const returnTax = taxOn(subtotal, taxRate);
+      const returnTotal = money(subtotal + returnTax);
+      await client.query("update returns set subtotal = $2, tax = $3, tax_rate = $4, total = $5 where id = $1", [returnId, subtotal, returnTax, taxRate, returnTotal]);
+      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','return',$1,$2,$3)", [returnId, -returnTotal, "Sale return"]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','return',$1,$2,$3)", [returnId, -cogs, "COGS reversal"]);
       await postJournal(client, {
         refType: "return",
@@ -2734,7 +2789,8 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         createdBy: userId,
         lines: [
           { account: "discounts", debit: subtotal, memo: "Sales return" },
-          { account: body.refundMethod === "credit" ? "accounts_receivable" : paymentAssetAccount(body.refundMethod), credit: subtotal },
+          { account: "tax_payable", debit: returnTax },
+          { account: body.refundMethod === "credit" ? "accounts_receivable" : paymentAssetAccount(body.refundMethod), credit: returnTotal },
           { account: "inventory_finished", debit: cogs },
           { account: "cogs", credit: cogs }
         ]
@@ -2792,8 +2848,11 @@ export async function registerCoreRoutes(app: FastifyInstance) {
           [shopId, line.product_id, qty, numberify(line.unit_cost), id, userId, body.reason]
         );
       }
+      const taxRate = normalizedTaxRate(saleRow.tax_rate);
+      const voidTax = taxOn(revenue, taxRate);
+      const refundTotal = money(revenue + voidTax);
       await client.query("update sales set status = 'void' where id = $1", [id]);
-      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale_void',$1,$2,$3)", [id, -revenue, body.reason]);
+      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale_void',$1,$2,$3)", [id, -refundTotal, body.reason]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale_void',$1,$2,$3)", [id, -cogs, "COGS reversal"]);
       await postJournal(client, {
         refType: "sale_void",
@@ -2802,7 +2861,8 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         createdBy: userId,
         lines: [
           { account: "discounts", debit: revenue, memo: "Voided sale" },
-          { account: String(saleRow.payment_method) === "credit" ? "accounts_receivable" : paymentAssetAccount(String(saleRow.payment_method)), credit: revenue },
+          { account: "tax_payable", debit: voidTax },
+          { account: String(saleRow.payment_method) === "credit" ? "accounts_receivable" : paymentAssetAccount(String(saleRow.payment_method)), credit: refundTotal },
           { account: "inventory_finished", debit: cogs },
           { account: "cogs", credit: cogs }
         ]
@@ -2909,6 +2969,241 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     }
   });
 
+  app.get("/customer-invoices", async () => {
+    const result = await pool.query(`
+      select ci.id, ci.invoice_no as "invoiceNo", ci.sale_id as "saleId", s.ref_no as "saleRefNo",
+             ci.customer_id as "customerId", coalesce(c.name, 'Walk-in customer') as "customerName",
+             ci.invoice_date as "invoiceDate", ci.due_date as "dueDate",
+             ci.subtotal, ci.discount, ci.tax, ci.total, ci.paid, ci.status, ci.created_at as "createdAt"
+      from customer_invoices ci
+      join sales s on s.id = ci.sale_id
+      left join customers c on c.id = ci.customer_id
+      order by ci.created_at desc
+      limit 200
+    `);
+    return result.rows.map((row) => ({
+      ...row,
+      subtotal: money(row.subtotal),
+      discount: money(row.discount),
+      tax: money(row.tax),
+      total: money(row.total),
+      paid: money(row.paid),
+      balance: money(numberify(row.total) - numberify(row.paid))
+    }));
+  });
+
+  app.get("/customer-invoices/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const [invoice, lines, payments] = await Promise.all([
+      pool.query(`
+        select ci.id, ci.invoice_no as "invoiceNo", ci.sale_id as "saleId", s.ref_no as "saleRefNo",
+               ci.customer_id as "customerId", coalesce(c.name, 'Walk-in customer') as "customerName",
+               ci.invoice_date as "invoiceDate", ci.due_date as "dueDate",
+               ci.subtotal, ci.discount, ci.tax, ci.total, ci.paid, ci.status, ci.created_at as "createdAt"
+        from customer_invoices ci
+        join sales s on s.id = ci.sale_id
+        left join customers c on c.id = ci.customer_id
+        where ci.id = $1
+      `, [id]),
+      pool.query(`
+        select si.id, p.name as "productName", si.quantity, si.unit_price as "unitPrice", si.discount, si.line_total as "lineTotal"
+        from customer_invoices ci
+        join sale_items si on si.sale_id = ci.sale_id
+        join products p on p.id = si.product_id
+        where ci.id = $1
+        order by p.name
+      `, [id]),
+      pool.query(`
+        select p.id, p.method, p.amount, p.paid_at as "paidAt", p.reference, p.note
+        from customer_invoices ci
+        join payments p on p.sale_id = ci.sale_id and p.party_type = 'customer'
+        where ci.id = $1
+        order by p.paid_at desc
+      `, [id])
+    ]);
+    const row = invoice.rows[0];
+    if (!row) throw app.httpErrors.notFound("Customer invoice not found");
+    return {
+      ...row,
+      subtotal: money(row.subtotal),
+      discount: money(row.discount),
+      tax: money(row.tax),
+      total: money(row.total),
+      paid: money(row.paid),
+      balance: money(numberify(row.total) - numberify(row.paid)),
+      lines: lines.rows.map((line) => ({ ...line, quantity: numberify(line.quantity), unitPrice: money(line.unitPrice), discount: money(line.discount), lineTotal: money(line.lineTotal) })),
+      payments: payments.rows.map((payment) => ({ ...payment, amount: money(payment.amount) }))
+    };
+  });
+
+  app.post("/customer-invoices/:id/payments", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const body = z.object({
+      amount: z.number().positive(),
+      method: z.enum(["cash", "card", "mobile", "bank", "credit"]).default("cash"),
+      reference: nullableText,
+      note: nullableText
+    }).parse(request.body ?? {});
+    const userId = actorId(request);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const invoice = await client.query("select * from customer_invoices where id = $1 for update", [id]);
+      const row = invoice.rows[0];
+      if (!row) throw app.httpErrors.notFound("Customer invoice not found");
+      const balance = money(numberify(row.total) - numberify(row.paid));
+      if (body.amount > balance) throw app.httpErrors.badRequest(`Payment is greater than invoice balance. Balance: ${formatMoney(balance)}`);
+      await client.query(
+        "insert into payments (party_type, customer_id, sale_id, method, amount, reference, note) values ('customer',$1,$2,$3,$4,$5,$6)",
+        [row.customer_id ?? null, row.sale_id, body.method, body.amount, body.reference ?? null, body.note ?? null]
+      );
+      const paid = money(numberify(row.paid) + body.amount);
+      const status = paid >= numberify(row.total) ? "paid" : "partial";
+      await client.query("update customer_invoices set paid = $2, status = $3::document_status where id = $1", [id, paid, status]);
+      await postJournal(client, {
+        refType: "customer_invoice_payment",
+        refId: id,
+        memo: body.note ?? "Customer invoice payment",
+        createdBy: userId,
+        lines: [
+          { account: paymentAssetAccount(body.method), debit: body.amount },
+          { account: "accounts_receivable", credit: body.amount }
+        ]
+      });
+      await client.query("commit");
+      return { ok: true };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.get("/supplier-returns", async () => {
+    const result = await pool.query(`
+      select sr.id, sr.ref_no as "refNo", sr.supplier_id as "supplierId", s.name as "supplierName",
+             sr.grn_id as "grnId", g.ref_no as "grnRefNo", sr.supplier_invoice_id as "supplierInvoiceId",
+             si.ref_no as "supplierInvoiceRefNo", sr.reason, sr.subtotal, sr.tax, sr.total, sr.status,
+             sr.created_at as "createdAt", coalesce(count(sri.id), 0) as "lineCount"
+      from supplier_returns sr
+      join suppliers s on s.id = sr.supplier_id
+      left join grns g on g.id = sr.grn_id
+      left join supplier_invoices si on si.id = sr.supplier_invoice_id
+      left join supplier_return_items sri on sri.supplier_return_id = sr.id
+      group by sr.id, s.name, g.ref_no, si.ref_no
+      order by sr.created_at desc
+      limit 200
+    `);
+    return result.rows.map((row) => ({ ...row, subtotal: money(row.subtotal), tax: money(row.tax), total: money(row.total), lineCount: Number(row.lineCount) }));
+  });
+
+  app.get("/supplier-returns/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const [supplierReturn, items] = await Promise.all([
+      pool.query(`
+        select sr.id, sr.ref_no as "refNo", sr.supplier_id as "supplierId", s.name as "supplierName",
+               sr.grn_id as "grnId", g.ref_no as "grnRefNo", sr.supplier_invoice_id as "supplierInvoiceId",
+               si.ref_no as "supplierInvoiceRefNo", sr.reason, sr.subtotal, sr.tax, sr.total, sr.status,
+               sr.created_at as "createdAt"
+        from supplier_returns sr
+        join suppliers s on s.id = sr.supplier_id
+        left join grns g on g.id = sr.grn_id
+        left join supplier_invoices si on si.id = sr.supplier_invoice_id
+        where sr.id = $1
+      `, [id]),
+      pool.query(`
+        select sri.id, sri.item_id as "itemId", sri.product_id as "productId",
+               coalesce(i.name, p.name) as name, coalesce(i.unit, p.unit) as unit,
+               sri.quantity, sri.unit_cost as "unitCost", sri.line_total as "lineTotal"
+        from supplier_return_items sri
+        left join items i on i.id = sri.item_id
+        left join products p on p.id = sri.product_id
+        where sri.supplier_return_id = $1
+        order by name
+      `, [id])
+    ]);
+    const row = supplierReturn.rows[0];
+    if (!row) throw app.httpErrors.notFound("Supplier return not found");
+    return {
+      ...row,
+      subtotal: money(row.subtotal),
+      tax: money(row.tax),
+      total: money(row.total),
+      items: items.rows.map((item) => ({ ...item, quantity: numberify(item.quantity), unitCost: money(item.unitCost), lineTotal: money(item.lineTotal) }))
+    };
+  });
+
+  app.post("/supplier-returns", async (request, reply) => {
+    const body = supplierReturnSchema.parse(request.body ?? {});
+    const userId = actorId(request);
+    const warehouseId = await defaultLocation("warehouse");
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      let subtotal = 0;
+      let rawInventoryReturn = 0;
+      let finishedInventoryReturn = 0;
+      const created = await client.query(
+        `insert into supplier_returns (ref_no, supplier_id, grn_id, supplier_invoice_id, reason, created_by)
+         values ($1,$2,$3,$4,$5,$6) returning id, ref_no`,
+        [ref("SRET"), body.supplierId, body.grnId ?? null, body.supplierInvoiceId ?? null, body.reason, userId]
+      );
+      const returnId = String(created.rows[0].id);
+
+      for (const line of body.items) {
+        const lineTotal = money(line.quantity * line.unitCost);
+        subtotal += lineTotal;
+        if (line.itemId) {
+          rawInventoryReturn += lineTotal;
+          await assertWarehouseItem(client, line.itemId, line.quantity);
+          await updateWarehouseItem(client, line.itemId, -line.quantity);
+          await client.query(
+            `insert into stock_movements (location_id, item_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+             values ($1,$2,'out',$3,$4,'supplier_return',$5,$6,$7)`,
+            [warehouseId, line.itemId, line.quantity, line.unitCost, returnId, userId, body.reason]
+          );
+        } else if (line.productId) {
+          finishedInventoryReturn += lineTotal;
+          await assertWarehouseProduct(client, line.productId, line.quantity);
+          await updateWarehouseProduct(client, line.productId, -line.quantity);
+          await client.query(
+            `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+             values ($1,$2,'out',$3,$4,'supplier_return',$5,$6,$7)`,
+            [warehouseId, line.productId, line.quantity, line.unitCost, returnId, userId, body.reason]
+          );
+        }
+        await client.query(
+          `insert into supplier_return_items (supplier_return_id, item_id, product_id, quantity, unit_cost, line_total)
+           values ($1,$2,$3,$4,$5,$6)`,
+          [returnId, line.itemId ?? null, line.productId ?? null, line.quantity, line.unitCost, lineTotal]
+        );
+      }
+
+      const total = money(subtotal);
+      await client.query("update supplier_returns set subtotal = $2, total = $2 where id = $1", [returnId, total]);
+      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_return','supplier_return',$1,$2,$3)", [returnId, -total, body.reason]);
+      await postJournal(client, {
+        refType: "supplier_return",
+        refId: returnId,
+        memo: body.reason,
+        createdBy: userId,
+        lines: [
+          { account: "accounts_payable", debit: total },
+          { account: "inventory_raw", credit: rawInventoryReturn },
+          { account: "inventory_finished", credit: finishedInventoryReturn }
+        ]
+      });
+      await client.query("commit");
+      return reply.code(201).send({ id: returnId, refNo: created.rows[0].ref_no });
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
   app.get("/finance", async () => {
     const result = await pool.query(`
       with account_totals as (
@@ -2930,9 +3225,9 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         coalesce((select debit - credit from account_totals where system_key = 'cogs'), 0) as cogs,
         coalesce((select sum(debit - credit) from account_totals where type = 'expense' and system_key <> 'cogs'), 0) as expenses,
         coalesce((select amount from supplier_payment_total), 0) as supplier_payments,
+        coalesce((select credit - debit from account_totals where system_key = 'tax_payable'), 0) as tax_payable,
         coalesce((select sum(total - paid) from supplier_invoices where status <> 'void'), 0) as accounts_payable,
-        coalesce((select sum(s.total) from sales s where s.customer_id is not null), 0) -
-        coalesce((select sum(p.amount) from payments p where p.customer_id is not null), 0) as accounts_receivable,
+        coalesce((select debit - credit from account_totals where system_key = 'accounts_receivable'), 0) as accounts_receivable,
         coalesce((select sum(quantity * i.average_cost) from warehouse_stock ws join items i on i.id = ws.item_id), 0) +
         coalesce((select sum(quantity * p.average_cost) from warehouse_stock ws join products p on p.id = ws.product_id), 0) as warehouse_value,
         coalesce((select sum(quantity * p.average_cost) from shop_stock ss join products p on p.id = ss.product_id), 0) as shop_value
@@ -2948,6 +3243,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       grossProfit: money(revenue - discounts - cogs),
       expenses: money(row.expenses),
       supplierPayments: money(row.supplier_payments),
+      taxPayable: money(row.tax_payable),
       accountsPayable: money(row.accounts_payable),
       accountsReceivable: money(row.accounts_receivable),
       warehouseValue: money(row.warehouse_value),

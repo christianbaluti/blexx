@@ -7,6 +7,7 @@ import type {
   Bom,
   Category,
   Customer,
+  CustomerInvoice,
   DashboardSummary,
   Expense,
   FinancialStatement,
@@ -22,9 +23,11 @@ import type {
   Sale,
   SaleLineInput,
   StockCount,
+  StockCountDetail,
   StockMovement,
   Supplier,
   SupplierInvoice,
+  SupplierReturn,
   SyncConflict,
   SyncHealth,
   SyncMutation,
@@ -237,10 +240,10 @@ export const api = {
       customerId: row.customer_id ? String(row.customer_id) : null,
       subtotal: Number(row.subtotal ?? 0),
       discount: Number(row.discount ?? 0),
-      tax: 0,
+      tax: Number(row.tax ?? 0),
       total: Number(row.total ?? 0),
-      payment: String(row.payment_method ?? "cash") as Sale["payment"],
-      status: "completed" as const
+      payment: String(row.payment ?? row.payment_method ?? "cash") as Sale["payment"],
+      status: String(row.status ?? "completed") as Sale["status"]
     }));
   },
   async purchaseOrders() {
@@ -269,6 +272,8 @@ export const api = {
       lineCount: Number(row.lineCount ?? (Array.isArray((row.payload as { items?: unknown[] } | undefined)?.items) ? (row.payload as { items?: unknown[] }).items?.length ?? 0 : 0)),
       subtotal: Number(row.subtotal ?? 0),
       discount: Number(row.discount ?? 0),
+      tax: Number(row.tax ?? 0),
+      taxRate: Number(row.taxRate ?? row.tax_rate ?? 0),
       total: Number(row.total ?? 0),
       status: String(row.status ?? "completed"),
       createdAt: String(row.createdAt ?? row.created_at ?? "")
@@ -317,6 +322,42 @@ export const api = {
   batches: () => cached<InventoryBatch[]>("inventory-batches", "/stock/batches", []),
   movements: () => cached<StockMovement[]>("inventory-movements", "/stock/movements", []),
   stockCounts: () => cached<StockCount[]>("stock-counts", "/stock-counts", []),
+  async stockCountDetail(id: string) {
+    const row = await request<Record<string, unknown> & { lines?: Record<string, unknown>[] }>(`/stock-counts/${id}`);
+    return {
+      id: String(row.id),
+      outletId: String(row.outletId ?? row.location_id ?? ""),
+      outletName: String(row.outletName ?? ""),
+      locationType: String(row.locationType ?? row.location_type ?? "warehouse") as StockCountDetail["locationType"],
+      status: String(row.status ?? "open") as StockCountDetail["status"],
+      createdAt: String(row.createdAt ?? row.created_at ?? ""),
+      closedAt: row.closedAt || row.closed_at ? String(row.closedAt ?? row.closed_at) : null,
+      variance: Number(row.variance ?? 0),
+      lines: (row.lines ?? []).map((line) => ({
+        id: String(line.id),
+        itemId: line.itemId || line.item_id ? String(line.itemId ?? line.item_id) : null,
+        productId: line.productId || line.product_id ? String(line.productId ?? line.product_id) : null,
+        name: String(line.name ?? ""),
+        sku: line.sku ? String(line.sku) : null,
+        unit: String(line.unit ?? "ea"),
+        expectedQty: Number(line.expectedQty ?? line.expected_qty ?? 0),
+        countedQty: line.countedQty == null && line.counted_qty == null ? null : Number(line.countedQty ?? line.counted_qty),
+        varianceQty: Number(line.varianceQty ?? line.variance_qty ?? 0)
+      }))
+    } satisfies StockCountDetail;
+  },
+  updateStockCount(id: string, payload: { lines: { id: string; countedQty: number }[] }) {
+    return request<{ ok: boolean }>(`/stock-counts/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+  },
+  submitStockCount(id: string) {
+    return request<{ ok: boolean }>(`/stock-counts/${id}/submit`, { method: "POST" });
+  },
+  closeStockCount(id: string) {
+    return request<{ ok: boolean }>(`/stock-counts/${id}/close`, { method: "POST" });
+  },
+  cancelStockCount(id: string) {
+    return request<{ ok: boolean }>(`/stock-counts/${id}/cancel`, { method: "POST" });
+  },
   async transfers() {
     const rows = await cached<Record<string, unknown>[]>("transfers", "/transfers", []);
     return rows.map((row) => ({
@@ -438,7 +479,7 @@ export const api = {
   async statements() {
     const row = await cached<Record<string, unknown>>("statements", "/finance", {});
     const assets = Number(row.warehouseValue ?? 0) + Number(row.shopValue ?? 0) + Number(row.accountsReceivable ?? 0);
-    const liabilities = Number(row.accountsPayable ?? 0);
+    const liabilities = Number(row.accountsPayable ?? 0) + Number(row.taxPayable ?? row.tax_payable ?? 0);
     return {
       period: "Current period",
       income: Number(row.revenue ?? 0),
@@ -447,7 +488,8 @@ export const api = {
       netProfit: Number(row.grossProfit ?? 0) - Number(row.expenses ?? 0),
       assets,
       liabilities,
-      equity: assets - liabilities
+      equity: assets - liabilities,
+      taxPayable: Number(row.taxPayable ?? row.tax_payable ?? 0)
     } satisfies FinancialStatement;
   },
   async reports() {
@@ -615,6 +657,20 @@ export const api = {
   supplierInvoiceDetail(id: string) {
     return request<Record<string, unknown>>(`/supplier-invoices/${id}`);
   },
+  customerInvoices: () => cached<CustomerInvoice[]>("customer-invoices", "/customer-invoices", []),
+  customerInvoiceDetail(id: string) {
+    return request<CustomerInvoice & { lines: Record<string, unknown>[]; payments: Record<string, unknown>[] }>(`/customer-invoices/${id}`);
+  },
+  recordCustomerInvoicePayment(id: string, payload: Record<string, unknown>) {
+    return request<{ ok: boolean }>(`/customer-invoices/${id}/payments`, { method: "POST", body: JSON.stringify(payload) });
+  },
+  supplierReturns: () => cached<SupplierReturn[]>("supplier-returns", "/supplier-returns", []),
+  supplierReturnDetail(id: string) {
+    return request<SupplierReturn & { items: Record<string, unknown>[] }>(`/supplier-returns/${id}`);
+  },
+  createSupplierReturn(payload: Record<string, unknown>) {
+    return request<{ id: string; refNo: string }>("/supplier-returns", { method: "POST", body: JSON.stringify(payload) });
+  },
   createReturn(payload: Record<string, unknown>) {
     return request<{ id: string }>("/returns", { method: "POST", body: JSON.stringify(payload) });
   },
@@ -717,6 +773,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     });
+  },
+  pullSync() {
+    return request<{ serverTime: string; products: Record<string, unknown>[]; customers: Record<string, unknown>[]; shopStock: Record<string, unknown>[] }>("/sync/pull");
   },
   resolveConflict(id: string) {
     return request<{ ok: boolean }>(`/sync/conflicts/${id}/resolve`, { method: "POST" });
