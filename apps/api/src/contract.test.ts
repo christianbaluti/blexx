@@ -21,6 +21,7 @@ const clientReferencedRoutes = [
   ["POST", "/expenses"],
   ["GET", "/stock-counts"],
   ["POST", "/stock-counts"],
+  ["DELETE", "/items/:id"],
   ["POST", "/transfers/:id/send"],
   ["POST", "/transfers/:id/receive"],
   ["POST", "/transfers/:id/cancel"],

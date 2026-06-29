@@ -968,6 +968,7 @@ export async function registerCoreRoutes(app) {
              0::numeric as "shopStock"
       from items i
       left join warehouse_stock ws on ws.item_id = i.id
+      where i.status = 'active'
       order by i.name
     `);
         return result.rows.map((row) => ({
@@ -998,6 +999,28 @@ export async function registerCoreRoutes(app) {
        where id = $1`, [id, body.sku ?? null, body.name ?? null, body.unit ?? null, body.reorderLevel ?? null, body.imageData ?? null, mime]);
         return { ok: true };
     });
+    app.delete("/items/:id", async (request) => {
+        const { id } = idParam.parse(request.params);
+        const linked = await pool.query(`
+      select 1 from warehouse_stock where item_id = $1 and quantity <> 0
+      union all select 1 from purchase_order_items where item_id = $1
+      union all select 1 from grn_items where item_id = $1
+      union all select 1 from product_blueprint_items where item_id = $1
+      union all select 1 from production_batch_items where item_id = $1
+      union all select 1 from stock_movements where item_id = $1
+      limit 1
+    `, [id]);
+        if (linked.rows.length) {
+            const archived = await pool.query("update items set status = 'disabled', updated_at = now() where id = $1 returning id", [id]);
+            if (!archived.rowCount)
+                throw app.httpErrors.notFound("Item not found");
+            return { ok: true, archived: true };
+        }
+        const deleted = await pool.query("delete from items where id = $1 returning id", [id]);
+        if (!deleted.rowCount)
+            throw app.httpErrors.notFound("Item not found");
+        return { ok: true, deleted: true };
+    });
     app.get("/products", async () => {
         const result = await pool.query(`
       select p.id, p.sku, p.barcode, p.name, p.unit, p.selling_price as "sellingPrice", p.average_cost as "averageCost",
@@ -1007,6 +1030,7 @@ export async function registerCoreRoutes(app) {
       left join categories c on c.id = p.category_id
       left join warehouse_stock ws on ws.product_id = p.id
       left join shop_stock ss on ss.product_id = p.id
+      where p.status = 'active'
       order by p.name
     `);
         return result.rows.map((row) => ({
@@ -1054,15 +1078,25 @@ export async function registerCoreRoutes(app) {
     app.delete("/products/:id", async (request) => {
         const { id } = idParam.parse(request.params);
         const linked = await pool.query(`
-      select 1 from product_blueprints where product_id = $1
+      select 1 from warehouse_stock where product_id = $1 and quantity <> 0
+      union all select 1 from shop_stock where product_id = $1 and quantity <> 0
+      union all select 1 from product_blueprints where product_id = $1
+      union all select 1 from production_batches where product_id = $1
+      union all select 1 from stock_transfers where product_id = $1
       union all select 1 from sale_items where product_id = $1
       union all select 1 from stock_movements where product_id = $1
       limit 1
     `, [id]);
-        if (linked.rows.length)
-            throw app.httpErrors.conflict("Product has activity. Suspend it instead of deleting.");
-        await pool.query("delete from products where id = $1", [id]);
-        return { ok: true };
+        if (linked.rows.length) {
+            const archived = await pool.query("update products set status = 'disabled', updated_at = now() where id = $1 returning id", [id]);
+            if (!archived.rowCount)
+                throw app.httpErrors.notFound("Product not found");
+            return { ok: true, archived: true };
+        }
+        const deleted = await pool.query("delete from products where id = $1 returning id", [id]);
+        if (!deleted.rowCount)
+            throw app.httpErrors.notFound("Product not found");
+        return { ok: true, deleted: true };
     });
     app.post("/purchase-orders", async (request, reply) => {
         const body = poSchema.parse(request.body);

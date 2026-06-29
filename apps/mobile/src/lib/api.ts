@@ -518,8 +518,11 @@ export const api = {
   updateItem(id: string, payload: Record<string, unknown>) {
     return request<{ ok: boolean }>(`/items/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
   },
+  deleteItem(id: string) {
+    return request<{ ok: boolean; archived?: boolean; deleted?: boolean }>(`/items/${id}`, { method: "DELETE" });
+  },
   deleteProduct(id: string) {
-    return request<{ ok: boolean }>(`/products/${id}`, { method: "DELETE" });
+    return request<{ ok: boolean; archived?: boolean; deleted?: boolean }>(`/products/${id}`, { method: "DELETE" });
   },
   createSupplier(payload: Record<string, unknown>) {
     return request<{ id: string }>("/suppliers", { method: "POST", body: JSON.stringify(payload) });
