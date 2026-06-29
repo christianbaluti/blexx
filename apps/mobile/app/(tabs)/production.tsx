@@ -14,6 +14,8 @@ export default function Production() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<ProductionTab>("bom");
   const [open, setOpen] = useState(false);
+  const [modalMode, setModalMode] = useState<"complete" | "plan">("complete");
+  const [batchId, setBatchId] = useState<string | null>(null);
   const [bomId, setBomId] = useState("");
   const [qtyProduced, setQtyProduced] = useState("1");
   const [qtyWaste, setQtyWaste] = useState("0");
@@ -24,30 +26,66 @@ export default function Production() {
   const totalCost = batches.reduce((sum, batch) => sum + batch.totalCost, 0);
   const totalWaste = batches.reduce((sum, batch) => sum + batch.qtyWaste, 0);
   const selectedBom = boms.find((bom) => bom.id === bomId);
-  const runProduction = useMutation({
-    mutationFn: () => api.createProduction({
-      bomId,
-      qtyProduced: Number(qtyProduced || 0),
-      qtyWaste: Number(qtyWaste || 0),
-      extraCost: Number(extraCost || 0),
-      sellingPrice: sellingPrice ? Number(sellingPrice) : undefined
-    }),
+  const invalidateProduction = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["production"] }),
+      queryClient.invalidateQueries({ queryKey: ["inventory"] }),
+      queryClient.invalidateQueries({ queryKey: ["products"] }),
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] })
+    ]);
+  };
+  const runProduction = useMutation<unknown, Error, void>({
+    mutationFn: () => {
+      const quantityProduced = Number(qtyProduced || 0);
+      const quantityWasted = Number(qtyWaste || 0);
+      const common = {
+        extraCost: Number(extraCost || 0),
+        sellingPrice: sellingPrice ? Number(sellingPrice) : undefined
+      };
+      if (batchId) {
+        return api.completeProduction(batchId, {
+          quantityToProduce: quantityProduced + quantityWasted,
+          quantityProduced,
+          quantityWasted,
+          ...common
+        });
+      }
+      if (modalMode === "plan") {
+        return api.planProduction({
+          bomId,
+          quantityToProduce: quantityProduced + quantityWasted,
+          ...common
+        });
+      }
+      return api.createProduction({
+        bomId,
+        qtyProduced: quantityProduced,
+        qtyWaste: quantityWasted,
+        ...common
+      });
+    },
     onSuccess: async () => {
       setOpen(false);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["production"] }),
-        queryClient.invalidateQueries({ queryKey: ["inventory"] }),
-        queryClient.invalidateQueries({ queryKey: ["products"] }),
-        queryClient.invalidateQueries({ queryKey: ["dashboard"] })
-      ]);
+      setBatchId(null);
+      await invalidateProduction();
     }
   });
+  const startBatch = useMutation({
+    mutationFn: (id: string) => api.startProduction(id),
+    onSuccess: invalidateProduction
+  });
+  const cancelBatch = useMutation({
+    mutationFn: (id: string) => api.cancelProduction(id, "Cancelled from production screen"),
+    onSuccess: invalidateProduction
+  });
 
-  function openRun(nextBomId?: string) {
+  function openRun(nextBomId?: string, mode: "complete" | "plan" = "complete", existingBatch?: typeof batches[number]) {
+    setBatchId(existingBatch?.id ?? null);
+    setModalMode(mode);
     setBomId(nextBomId ?? boms[0]?.id ?? "");
-    setQtyProduced("1");
+    setQtyProduced(existingBatch ? String(existingBatch.quantityToProduce || existingBatch.qtyProduced || 1) : "1");
     setQtyWaste("0");
-    setExtraCost("0");
+    setExtraCost(existingBatch?.totalCost ? String(existingBatch.totalCost) : "0");
     setSellingPrice("");
     setOpen(true);
   }
@@ -59,7 +97,12 @@ export default function Production() {
           eyebrow="Operations"
           title="Production"
           description="Bills of material, batches, raw material deduction, waste tracking and cost calculations."
-          actions={<CommandButton icon="plus" label="New batch" primary onPress={() => openRun()} />}
+          actions={(
+            <View style={styles.headerActions}>
+              <CommandButton icon="clipboard-plus-outline" label="Plan batch" onPress={() => openRun(undefined, "plan")} />
+              <CommandButton icon="plus" label="Run now" primary onPress={() => openRun()} />
+            </View>
+          )}
         />
         <View style={styles.metrics}>
           <MetricCard label="BOMs" value={boms.length} icon="file-tree-outline" />
@@ -89,7 +132,10 @@ export default function Production() {
                       <Text style={styles.bomTitle}>{bom.name}</Text>
                       <Text style={styles.rowMeta}>Produces {bom.productName ?? bom.productId}</Text>
                     </View>
-                    <CommandButton icon="source-branch" label="Run production" onPress={() => openRun(bom.id)} />
+                    <View style={styles.bomActions}>
+                      <CommandButton icon="clipboard-plus-outline" label="Plan" onPress={() => openRun(bom.id, "plan")} />
+                      <CommandButton icon="source-branch" label="Run" onPress={() => openRun(bom.id)} />
+                    </View>
                   </View>
                   <View style={styles.bomGrid}>
                     <View style={styles.recipePanel}>
@@ -114,15 +160,24 @@ export default function Production() {
         {tab === "batches" ? (
           batches.length ? (
             <TableCard>
-              <TableHeader columns={["Reference", "BOM", "Produced", "Waste", "Cost", "Produced at"]} />
+              <TableHeader columns={["Reference", "BOM", "Status", "Produced", "Waste", "Cost", "Actions"]} />
               {batches.map((batch) => (
                 <View key={batch.id} style={styles.row}>
                   <Text style={styles.cellText}>{batch.refNo}</Text>
-                  <Text style={styles.cellText}>{batch.bomName}</Text>
+                  <View style={styles.cellBlock}>
+                    <Text style={styles.cellStrong}>{batch.bomName}</Text>
+                    <Text style={styles.rowMeta}>Blueprint v{batch.blueprintVersion ?? 1}</Text>
+                  </View>
+                  <View style={styles.cell}><Badge tone={batch.status === "completed" ? "success" : batch.status === "cancelled" ? "muted" : "warning"}>{batch.status ?? "completed"}</Badge></View>
                   <Text style={styles.rightCell}>{batch.qtyProduced}</Text>
                   <Text style={[styles.rightCell, batch.qtyWaste > 0 && { color: colors.warning }]}>{batch.qtyWaste}</Text>
                   <Text style={styles.rightCell}>{formatMwk(batch.totalCost)}</Text>
-                  <Text style={styles.mutedText}>{new Date(batch.producedAt).toLocaleString()}</Text>
+                  <View style={styles.batchActions}>
+                    {batch.status === "planned" ? <CommandButton icon="play" label="Start" onPress={() => startBatch.mutate(batch.id)} /> : null}
+                    {batch.status === "started" ? <CommandButton icon="check" label="Complete" onPress={() => openRun(batch.bomId, "complete", batch)} /> : null}
+                    {batch.status === "planned" || batch.status === "started" ? <CommandButton icon="close" label="Cancel" onPress={() => cancelBatch.mutate(batch.id)} /> : null}
+                    {batch.status === "completed" ? <Text style={styles.mutedText}>{new Date(batch.completedAt ?? batch.producedAt).toLocaleDateString()}</Text> : null}
+                  </View>
                 </View>
               ))}
             </TableCard>
@@ -150,7 +205,7 @@ export default function Production() {
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
           <Pressable style={styles.panel}>
-            <Text style={styles.modalTitle}>Run production</Text>
+            <Text style={styles.modalTitle}>{batchId ? "Complete production" : modalMode === "plan" ? "Plan production" : "Run production"}</Text>
             <PickerRail label="BOM blueprint" items={boms.map((bom) => ({ id: bom.id, name: bom.name }))} value={bomId} onChange={setBomId} />
             <View style={styles.locationPill}>
               <MaterialCommunityIcons name="warehouse" size={17} color={colors.accent} />
@@ -163,12 +218,12 @@ export default function Production() {
               <Field style={styles.gridField} value={sellingPrice} onChangeText={setSellingPrice} keyboardType="numeric" placeholder="Selling price after production" />
             </View>
             <Text style={styles.summaryText}>
-              Expected output per build: {selectedBom?.outputQty ?? 1}. Raw items are deducted from Warehouse and finished stock is created in Warehouse.
+              Expected output per build: {selectedBom?.outputQty ?? 1}. {modalMode === "plan" && !batchId ? "Planned batches check stock when started and deduct stock when completed." : "Raw items are deducted from Warehouse and finished stock is created in Warehouse."}
             </Text>
             {runProduction.error ? <Text style={styles.error}>{runProduction.error instanceof Error ? runProduction.error.message : "Production failed"}</Text> : null}
             <View style={styles.modalActions}>
               <Button variant="outline" onPress={() => setOpen(false)}>Cancel</Button>
-              <Button onPress={() => runProduction.mutate()} disabled={!bomId || !Number(qtyProduced) || runProduction.isPending}>Run</Button>
+              <Button onPress={() => runProduction.mutate()} disabled={!bomId || !Number(qtyProduced) || runProduction.isPending}>{batchId ? "Complete" : modalMode === "plan" ? "Plan" : "Run"}</Button>
             </View>
           </Pressable>
         </Pressable>
@@ -197,10 +252,12 @@ function PickerRail({ label, items, value, onChange }: { label: string; items: {
 
 const styles = StyleSheet.create({
   content: { gap: 14, padding: 18, width: "100%", maxWidth: 1240, alignSelf: "center" },
+  headerActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   metrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   bomList: { gap: 12 },
   bomCard: { gap: 14 },
   bomHeader: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
+  bomActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   smallLabel: { color: colors.muted, fontSize: 10, fontWeight: "900", textTransform: "uppercase" },
   bomTitle: { color: colors.ink, fontFamily: typography.displayBold, fontSize: 21, fontWeight: "700", marginTop: 4 },
   bomGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
@@ -214,8 +271,11 @@ const styles = StyleSheet.create({
   costTotalValue: { color: colors.accent, fontFamily: typography.monoMedium, fontWeight: "900" },
   row: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 11 },
   cell: { flex: 1, minWidth: 100 },
+  cellBlock: { flex: 1, minWidth: 130 },
+  cellStrong: { color: colors.ink, fontWeight: "900" },
   cellText: { flex: 1, minWidth: 130, color: colors.ink, fontWeight: "800" },
   mutedText: { flex: 1, minWidth: 140, color: colors.muted, fontSize: 12 },
+  batchActions: { flex: 1.4, minWidth: 180, flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 7 },
   rightCell: { flex: 1, minWidth: 90, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
   rowMeta: { color: colors.muted, fontSize: 12 },
   valueText: { color: colors.ink, fontFamily: typography.monoMedium, fontWeight: "900" },

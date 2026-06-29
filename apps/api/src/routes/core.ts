@@ -34,6 +34,59 @@ function money(value: unknown) {
   return Number(Number(value ?? 0).toFixed(2));
 }
 
+type JournalLineInput = {
+  account: string;
+  debit?: number;
+  credit?: number;
+  memo?: string | null;
+};
+
+function paymentAssetAccount(method?: string | null) {
+  return method === "cash" ? "cash" : "bank";
+}
+
+async function journalAccountId(client: DbClient, systemKey: string) {
+  const result = await client.query("select id from chart_accounts where system_key = $1 and status = 'active'", [systemKey]);
+  const accountId = result.rows[0]?.id;
+  if (!accountId) throw new Error(`Ledger account is not configured: ${systemKey}`);
+  return String(accountId);
+}
+
+async function postJournal(
+  client: DbClient,
+  input: { refType: string; refId?: string | null; memo: string; createdBy?: string | null; lines: JournalLineInput[] }
+) {
+  const lines = input.lines
+    .map((line) => ({
+      ...line,
+      debit: money(line.debit ?? 0),
+      credit: money(line.credit ?? 0)
+    }))
+    .filter((line) => line.debit > 0 || line.credit > 0);
+
+  if (!lines.length) return null;
+
+  const debitTotal = money(lines.reduce((sum, line) => sum + line.debit, 0));
+  const creditTotal = money(lines.reduce((sum, line) => sum + line.credit, 0));
+  if (Math.abs(debitTotal - creditTotal) > 0.009) {
+    throw new Error(`Journal is not balanced. Debits ${debitTotal}, credits ${creditTotal}`);
+  }
+
+  const entry = await client.query(
+    "insert into journal_entries (ref_type, ref_id, memo, created_by) values ($1,$2,$3,$4) returning id",
+    [input.refType, input.refId ?? null, input.memo, input.createdBy ?? null]
+  );
+  const entryId = String(entry.rows[0].id);
+  for (const line of lines) {
+    const accountId = await journalAccountId(client, line.account);
+    await client.query(
+      "insert into journal_lines (journal_entry_id, account_id, debit, credit, memo) values ($1,$2,$3,$4,$5)",
+      [entryId, accountId, line.debit, line.credit, line.memo ?? null]
+    );
+  }
+  return entryId;
+}
+
 function renderTemplate(template: string, values: Record<string, string>) {
   return Object.entries(values).reduce((text, [key, value]) => text.replaceAll(`{{${key}}}`, value), template);
 }
@@ -411,7 +464,29 @@ const productionSchema = z.object({
   quantityWasted: z.number().nonnegative().default(0),
   extraCost: z.number().nonnegative().default(0),
   sellingPrice: z.number().nonnegative().optional(),
+  wasteReason: nullableText,
   producedBy: z.string().uuid().nullable().optional()
+});
+
+const productionPlanSchema = z.object({
+  blueprintId: z.string().uuid(),
+  quantityToProduce: z.number().positive(),
+  extraCost: z.number().nonnegative().default(0),
+  sellingPrice: z.number().nonnegative().optional(),
+  wasteReason: nullableText
+});
+
+const productionCompleteSchema = z.object({
+  quantityToProduce: z.number().positive().optional(),
+  quantityProduced: z.number().positive(),
+  quantityWasted: z.number().nonnegative().default(0),
+  extraCost: z.number().nonnegative().default(0),
+  sellingPrice: z.number().nonnegative().optional(),
+  wasteReason: nullableText,
+  actualItems: z.array(z.object({
+    itemId: z.string().uuid(),
+    consumedQty: z.number().positive()
+  })).default([])
 });
 
 const transferSchema = z.object({
@@ -709,6 +784,19 @@ export async function registerCoreRoutes(app: FastifyInstance) {
           }
           await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale',$1,$2,'Offline POS sale')", [sale.rows[0].id, total]);
           await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale',$1,$2,'Offline COGS')", [sale.rows[0].id, cogs]);
+          await postJournal(client, {
+            refType: "sale",
+            refId: String(sale.rows[0].id),
+            memo: "Offline POS sale",
+            createdBy: userId,
+            lines: [
+              { account: normalized.paymentMethod === "credit" ? "accounts_receivable" : paymentAssetAccount(normalized.paymentMethod), debit: total },
+              ...(normalized.discount ? [{ account: "discounts", debit: normalized.discount, memo: "Sale discount" }] : []),
+              { account: "sales_revenue", credit: total + normalized.discount },
+              { account: "cogs", debit: cogs },
+              { account: "inventory_finished", credit: cogs }
+            ]
+          });
           await client.query("update sync_mutations set status = 'accepted', applied_at = now() where id = $1", [mutation.id]);
           accepted += 1;
           acceptedIds.push(mutation.id);
@@ -844,7 +932,18 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       pool.query(`
       select
         coalesce((select sum(total) from sales where sale_date >= now() - interval '14 days'), 0) as revenue_14d,
-        coalesce((select coalesce(sum(amount) filter (where type = 'sale_revenue'), 0) - coalesce(sum(amount) filter (where type in ('discount', 'cogs')), 0) from finance_transactions where created_at >= now() - interval '14 days'), 0) as profit_14d,
+        coalesce((
+          select sum(case
+            when ca.type = 'income' then jl.credit - jl.debit
+            when ca.type = 'expense' then jl.credit - jl.debit
+            else 0
+          end)
+          from journal_lines jl
+          join journal_entries je on je.id = jl.journal_entry_id
+          join chart_accounts ca on ca.id = jl.account_id
+          where je.posted_at >= now() - interval '14 days'
+            and ca.type in ('income', 'expense')
+        ), 0) as profit_14d,
         coalesce((select sum(quantity * p.average_cost) from shop_stock ss join products p on p.id = ss.product_id), 0) as shop_value,
         coalesce((select sum(quantity * p.average_cost) from warehouse_stock ws join products p on p.id = ws.product_id), 0) +
         coalesce((select sum(quantity * i.average_cost) from warehouse_stock ws join items i on i.id = ws.item_id), 0) as warehouse_value,
@@ -1502,6 +1601,17 @@ export async function registerCoreRoutes(app: FastifyInstance) {
           }
         }
         await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_invoice','supplier_invoice',$1,$2,'Supplier invoice from GRN')", [invoice.rows[0].id, invoiceTotal]);
+        await postJournal(client, {
+          refType: "supplier_invoice",
+          refId: String(invoice.rows[0].id),
+          memo: "Supplier invoice from GRN",
+          createdBy: userId,
+          lines: [
+            { account: "inventory_raw", debit: goodsTotal, memo: "Received goods" },
+            { account: "purchase_expense", debit: extraCostTotal, memo: "Landed costs" },
+            { account: "accounts_payable", credit: invoiceTotal }
+          ]
+        });
       }
       await client.query("commit");
       return reply.code(201).send({ id: grnId, refNo: grnRef });
@@ -1564,6 +1674,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.post("/supplier-invoices", async (request, reply) => {
     const body = invoiceSchema.parse(request.body);
+    const userId = actorId(request);
     const paid = body.paid ?? 0;
     const status = paid >= body.total && body.total > 0 ? "paid" : paid > 0 ? "partial" : "open";
     const client = await pool.connect();
@@ -1577,6 +1688,16 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       const invoiceId = result.rows[0].id;
       await client.query("insert into expenses (supplier_invoice_id, category, description, amount, status) values ($1,'supplier_invoice','Supplier invoice',$2,$3)", [invoiceId, body.total, status]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_invoice','supplier_invoice',$1,$2,'Supplier invoice')", [invoiceId, body.total]);
+      await postJournal(client, {
+        refType: "supplier_invoice",
+        refId: String(invoiceId),
+        memo: body.grnId ? "Supplier invoice for received goods" : "Supplier invoice",
+        createdBy: userId,
+        lines: [
+          { account: body.grnId ? "inventory_raw" : "purchase_expense", debit: body.total },
+          { account: "accounts_payable", credit: body.total }
+        ]
+      });
       if (paid > 0) {
         await client.query(
           `insert into payments (party_type, supplier_id, supplier_invoice_id, method, amount, reference, attachment_name, attachment_mime, attachment_data, note)
@@ -1584,6 +1705,16 @@ export async function registerCoreRoutes(app: FastifyInstance) {
           [body.supplierId, invoiceId, body.paymentMethod ?? "bank", paid, body.paymentReference ?? null, body.paymentAttachmentName ?? null, body.paymentAttachmentMime ?? null, body.paymentAttachmentData ?? null, body.paymentNote ?? null]
         );
         await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_payment','supplier_invoice',$1,$2,'Supplier payment')", [invoiceId, paid]);
+        await postJournal(client, {
+          refType: "supplier_payment",
+          refId: String(invoiceId),
+          memo: "Supplier payment",
+          createdBy: userId,
+          lines: [
+            { account: "accounts_payable", debit: paid },
+            { account: paymentAssetAccount(body.paymentMethod ?? "bank"), credit: paid }
+          ]
+        });
       }
       await client.query("commit");
       return reply.code(201).send({ id: result.rows[0].id, refNo: result.rows[0].ref_no });
@@ -1663,6 +1794,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       attachmentData: attachmentDataUrl,
       note: nullableText
     }).parse(request.body);
+    const userId = actorId(request);
     const client = await pool.connect();
     try {
       await client.query("begin");
@@ -1678,6 +1810,16 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       await client.query("update supplier_invoices set paid = $2, status = $3 where id = $1", [id, paid, status]);
       await client.query("update expenses set status = $2 where supplier_invoice_id = $1", [id, status]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('supplier_payment','supplier_invoice',$1,$2,'Supplier payment')", [id, body.amount]);
+      await postJournal(client, {
+        refType: "supplier_payment",
+        refId: id,
+        memo: "Supplier payment",
+        createdBy: userId,
+        lines: [
+          { account: "accounts_payable", debit: body.amount },
+          { account: paymentAssetAccount(body.method), credit: body.amount }
+        ]
+      });
       await client.query("commit");
       return { ok: true };
     } catch (error) {
@@ -1690,14 +1832,16 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.get("/blueprints", async () => {
     const result = await pool.query(`
-      select b.*, p.name as "productName", p.selling_price as "sellingPrice",
+      select b.*, b.output_qty as "outputQty", b.labor_cost as "laborCost", b.overhead_cost as "overheadCost",
+        b.is_active as "isActive", b.archived_at as "archivedAt", b.parent_blueprint_id as "parentBlueprintId",
+        p.name as "productName", p.selling_price as "sellingPrice",
         coalesce(json_agg(json_build_object('itemId', bi.item_id, 'itemName', i.name, 'quantity', bi.quantity)) filter (where bi.id is not null), '[]') as items
       from product_blueprints b
       join products p on p.id = b.product_id
       left join product_blueprint_items bi on bi.blueprint_id = b.id
       left join items i on i.id = bi.item_id
       group by b.id, p.name, p.selling_price
-      order by b.created_at desc
+      order by b.is_active desc, coalesce(b.parent_blueprint_id, b.id), b.version desc, b.created_at desc
     `);
     return result.rows;
   });
@@ -1708,14 +1852,16 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     try {
       await client.query("begin");
       const bp = await client.query(
-        `insert into product_blueprints (product_id, name, output_qty, labor_cost, overhead_cost) values ($1,$2,$3,$4,$5) returning id`,
+        `insert into product_blueprints (product_id, name, output_qty, labor_cost, overhead_cost, version, is_active, active)
+         values ($1,$2,$3,$4,$5,1,true,true) returning id, version`,
         [body.productId, body.name, body.outputQty, body.laborCost, body.overheadCost]
       );
+      await client.query("update product_blueprints set parent_blueprint_id = id where id = $1", [bp.rows[0].id]);
       for (const line of body.items) {
         await client.query("insert into product_blueprint_items (blueprint_id, item_id, quantity) values ($1,$2,$3)", [bp.rows[0].id, line.itemId, line.quantity]);
       }
       await client.query("commit");
-      return reply.code(201).send({ id: bp.rows[0].id });
+      return reply.code(201).send({ id: bp.rows[0].id, version: bp.rows[0].version });
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -1723,6 +1869,139 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       client.release();
     }
   });
+
+  app.patch("/blueprints/:id", async (request, reply) => {
+    const { id } = idParam.parse(request.params);
+    const body = blueprintSchema.parse(request.body);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const current = await client.query("select * from product_blueprints where id = $1 for update", [id]);
+      const existing = current.rows[0];
+      if (!existing) throw app.httpErrors.notFound("Blueprint not found");
+      const parentId = String(existing.parent_blueprint_id ?? existing.id);
+      const nextVersion = numberify(existing.version) + 1;
+      await client.query("update product_blueprints set is_active = false, active = false, archived_at = coalesce(archived_at, now()) where id = $1", [id]);
+      const next = await client.query(
+        `insert into product_blueprints (product_id, name, output_qty, labor_cost, overhead_cost, version, parent_blueprint_id, is_active, active)
+         values ($1,$2,$3,$4,$5,$6,$7,true,true) returning id, version`,
+        [body.productId, body.name, body.outputQty, body.laborCost, body.overheadCost, nextVersion, parentId]
+      );
+      for (const line of body.items) {
+        await client.query("insert into product_blueprint_items (blueprint_id, item_id, quantity) values ($1,$2,$3)", [next.rows[0].id, line.itemId, line.quantity]);
+      }
+      await client.query("commit");
+      return reply.code(201).send({ id: next.rows[0].id, version: next.rows[0].version });
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.post("/blueprints/:id/archive", async (request) => {
+    const { id } = idParam.parse(request.params);
+    await pool.query("update product_blueprints set is_active = false, active = false, archived_at = coalesce(archived_at, now()) where id = $1", [id]);
+    return { ok: true };
+  });
+
+  async function completeProductionBatch(
+    client: DbClient,
+    batchId: string,
+    body: z.infer<typeof productionCompleteSchema>,
+    userId: string | null
+  ) {
+    const batch = await client.query("select * from production_batches where id = $1 for update", [batchId]);
+    const batchRow = batch.rows[0];
+    if (!batchRow) throw app.httpErrors.notFound("Production batch not found");
+    if (String(batchRow.status) === "completed") throw app.httpErrors.badRequest("Production batch is already completed.");
+    if (String(batchRow.status) === "cancelled") throw app.httpErrors.badRequest("Cancelled production batches cannot be completed.");
+
+    const bp = await client.query("select * from product_blueprints where id = $1", [batchRow.blueprint_id]);
+    const blueprint = bp.rows[0];
+    if (!blueprint) throw app.httpErrors.notFound("Blueprint not found");
+
+    const quantityToProduce = body.quantityToProduce ?? numberify(batchRow.quantity_to_produce);
+    const factor = quantityToProduce / numberify(blueprint.output_qty);
+    const components = await client.query(`
+      select bi.item_id, bi.quantity, i.average_cost
+      from product_blueprint_items bi join items i on i.id = bi.item_id
+      where bi.blueprint_id = $1
+    `, [batchRow.blueprint_id]);
+    const actual = new Map(body.actualItems.map((line) => [line.itemId, line.consumedQty]));
+    let materialCost = 0;
+    for (const line of components.rows) {
+      const requiredQty = actual.get(String(line.item_id)) ?? numberify(line.quantity) * factor;
+      await assertWarehouseItem(client, String(line.item_id), requiredQty);
+      materialCost += requiredQty * numberify(line.average_cost);
+    }
+
+    const overheadCost = numberify(blueprint.labor_cost) + numberify(blueprint.overhead_cost) + body.extraCost;
+    const totalCost = materialCost + overheadCost;
+    const unitCost = totalCost / body.quantityProduced;
+
+    await client.query("delete from production_batch_items where production_batch_id = $1", [batchId]);
+    for (const line of components.rows) {
+      const requiredQty = actual.get(String(line.item_id)) ?? numberify(line.quantity) * factor;
+      const lineCost = requiredQty * numberify(line.average_cost);
+      await updateWarehouseItem(client, String(line.item_id), -requiredQty);
+      await client.query(
+        "insert into production_batch_items (production_batch_id, item_id, required_qty, consumed_qty, unit_cost, total_cost) values ($1,$2,$3,$4,$5,$6)",
+        [batchId, line.item_id, numberify(line.quantity) * factor, requiredQty, line.average_cost, lineCost]
+      );
+      await client.query(
+        `insert into stock_movements (location_id, item_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+         values ($1,$2,'out',$3,$4,'production',$5,$6,'Raw item consumed')`,
+        [batchRow.warehouse_location_id, line.item_id, requiredQty, line.average_cost, batchId, userId]
+      );
+    }
+
+    await updateWarehouseProduct(client, String(blueprint.product_id), body.quantityProduced);
+    await client.query(
+      `update products
+       set average_cost = $2, selling_price = coalesce($3, selling_price), updated_at = now()
+       where id = $1`,
+      [blueprint.product_id, unitCost, body.sellingPrice ?? null]
+    );
+    await client.query(
+      `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
+       values ($1,$2,'in',$3,$4,'production',$5,$6,'Finished product produced')`,
+      [batchRow.warehouse_location_id, blueprint.product_id, body.quantityProduced, unitCost, batchId, userId]
+    );
+    await client.query(
+      `update production_batches
+       set quantity_to_produce = $2,
+           quantity_produced = $3,
+           quantity_wasted = $4,
+           extra_cost = $5,
+           total_cost = $6,
+           unit_cost = $7,
+           selling_price = coalesce($8, selling_price),
+           produced_by = coalesce($9, produced_by),
+           status = 'completed',
+           started_at = coalesce(started_at, now()),
+           completed_at = now(),
+           produced_at = now(),
+           waste_reason = $10
+       where id = $1`,
+      [batchId, quantityToProduce, body.quantityProduced, body.quantityWasted, body.extraCost, totalCost, unitCost, body.sellingPrice ?? null, userId, body.wasteReason ?? null]
+    );
+    await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('production_cost','production_batch',$1,$2,'Production cost')", [batchId, totalCost]);
+    await postJournal(client, {
+      refType: "production_batch",
+      refId: batchId,
+      memo: "Production completion",
+      createdBy: userId,
+      lines: [
+        { account: "inventory_finished", debit: totalCost },
+        { account: "inventory_raw", credit: materialCost },
+        { account: "bank", credit: overheadCost, memo: "Labour, overhead and extra production costs" }
+      ]
+    });
+
+    return { id: batchId, refNo: String(batchRow.ref_no), totalCost: money(totalCost), unitCost: numberify(unitCost) };
+  }
 
   app.post("/production", async (request, reply) => {
     const body = productionSchema.parse(request.body);
@@ -1733,49 +2012,22 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       await client.query("begin");
       const bp = await client.query("select * from product_blueprints where id = $1", [body.blueprintId]);
       if (!bp.rows[0]) throw app.httpErrors.notFound("Blueprint not found");
-      const factor = body.quantityToProduce / numberify(bp.rows[0].output_qty);
-      const components = await client.query(`
-        select bi.item_id, bi.quantity, i.average_cost
-        from product_blueprint_items bi join items i on i.id = bi.item_id
-        where bi.blueprint_id = $1
-      `, [body.blueprintId]);
-      let materialCost = 0;
-      for (const line of components.rows) {
-        const requiredQty = numberify(line.quantity) * factor;
-        await assertWarehouseItem(client, line.item_id, requiredQty);
-        materialCost += requiredQty * numberify(line.average_cost);
-      }
-      const totalCost = materialCost + numberify(bp.rows[0].labor_cost) + numberify(bp.rows[0].overhead_cost) + body.extraCost;
-      const unitCost = totalCost / body.quantityProduced;
       const batch = await client.query(
-        `insert into production_batches (ref_no, blueprint_id, warehouse_location_id, quantity_to_produce, quantity_produced, quantity_wasted, extra_cost, total_cost, unit_cost, selling_price, produced_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning id, ref_no`,
-        [ref("PB"), body.blueprintId, warehouseId, body.quantityToProduce, body.quantityProduced, body.quantityWasted, body.extraCost, totalCost, unitCost, body.sellingPrice ?? null, userId]
+        `insert into production_batches (ref_no, blueprint_id, blueprint_version, warehouse_location_id, quantity_to_produce, quantity_produced, quantity_wasted, extra_cost, total_cost, unit_cost, selling_price, produced_by, planned_by, status, started_at)
+         values ($1,$2,$3,$4,$5,0,0,$6,0,0,$7,$8,$8,'started',now()) returning id, ref_no`,
+        [ref("PB"), body.blueprintId, bp.rows[0].version ?? 1, warehouseId, body.quantityToProduce, body.extraCost, body.sellingPrice ?? null, userId]
       );
-      for (const line of components.rows) {
-        const requiredQty = numberify(line.quantity) * factor;
-        const lineCost = requiredQty * numberify(line.average_cost);
-        await updateWarehouseItem(client, line.item_id, -requiredQty);
-        await client.query(
-          "insert into production_batch_items (production_batch_id, item_id, required_qty, consumed_qty, unit_cost, total_cost) values ($1,$2,$3,$3,$4,$5)",
-          [batch.rows[0].id, line.item_id, requiredQty, line.average_cost, lineCost]
-        );
-        await client.query(
-          `insert into stock_movements (location_id, item_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
-           values ($1,$2,'out',$3,$4,'production',$5,$6,'Raw item consumed')`,
-          [warehouseId, line.item_id, requiredQty, line.average_cost, batch.rows[0].id, userId]
-        );
-      }
-      await updateWarehouseProduct(client, bp.rows[0].product_id, body.quantityProduced);
-      await client.query("update products set average_cost = $2, selling_price = coalesce($3, selling_price), updated_at = now() where id = $1", [bp.rows[0].product_id, unitCost, body.sellingPrice ?? null]);
-      await client.query(
-        `insert into stock_movements (location_id, product_id, direction, quantity, unit_cost, ref_type, ref_id, user_id, note)
-         values ($1,$2,'in',$3,$4,'production',$5,$6,'Finished product produced')`,
-        [warehouseId, bp.rows[0].product_id, body.quantityProduced, unitCost, batch.rows[0].id, userId]
-      );
-      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('production_cost','production_batch',$1,$2,'Production cost')", [batch.rows[0].id, totalCost]);
+      const completed = await completeProductionBatch(client, String(batch.rows[0].id), {
+        quantityToProduce: body.quantityToProduce,
+        quantityProduced: body.quantityProduced,
+        quantityWasted: body.quantityWasted,
+        extraCost: body.extraCost,
+        sellingPrice: body.sellingPrice,
+        wasteReason: body.wasteReason,
+        actualItems: []
+      }, userId);
       await client.query("commit");
-      return reply.code(201).send({ id: batch.rows[0].id, refNo: batch.rows[0].ref_no, totalCost: money(totalCost), unitCost: numberify(unitCost) });
+      return reply.code(201).send(completed);
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -1784,13 +2036,102 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     }
   });
 
+  app.post("/production/plans", async (request, reply) => {
+    const body = productionPlanSchema.parse(request.body);
+    const userId = actorId(request);
+    const warehouseId = await defaultLocation("warehouse");
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const bp = await client.query("select * from product_blueprints where id = $1", [body.blueprintId]);
+      if (!bp.rows[0]) throw app.httpErrors.notFound("Blueprint not found");
+      const batch = await client.query(
+        `insert into production_batches (ref_no, blueprint_id, blueprint_version, warehouse_location_id, quantity_to_produce,
+          quantity_produced, quantity_wasted, extra_cost, total_cost, unit_cost, selling_price, produced_by, planned_by, status, waste_reason)
+         values ($1,$2,$3,$4,$5,0,0,$6,0,0,$7,$8,$8,'planned',$9)
+         returning id, ref_no`,
+        [ref("PB"), body.blueprintId, bp.rows[0].version ?? 1, warehouseId, body.quantityToProduce, body.extraCost, body.sellingPrice ?? null, userId, body.wasteReason ?? null]
+      );
+      await client.query("commit");
+      return reply.code(201).send({ id: batch.rows[0].id, refNo: batch.rows[0].ref_no });
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.post("/production/:id/start", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const batch = await client.query("select * from production_batches where id = $1 for update", [id]);
+      const batchRow = batch.rows[0];
+      if (!batchRow) throw app.httpErrors.notFound("Production batch not found");
+      if (String(batchRow.status) !== "planned") throw app.httpErrors.badRequest("Only planned batches can be started.");
+      const bp = await client.query("select * from product_blueprints where id = $1", [batchRow.blueprint_id]);
+      const factor = numberify(batchRow.quantity_to_produce) / numberify(bp.rows[0]?.output_qty);
+      const components = await client.query("select item_id, quantity from product_blueprint_items where blueprint_id = $1", [batchRow.blueprint_id]);
+      for (const line of components.rows) {
+        await assertWarehouseItem(client, String(line.item_id), numberify(line.quantity) * factor);
+      }
+      await client.query("update production_batches set status = 'started', started_at = now() where id = $1", [id]);
+      await client.query("commit");
+      return { ok: true };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.post("/production/:id/complete", async (request, reply) => {
+    const { id } = idParam.parse(request.params);
+    const body = productionCompleteSchema.parse(request.body);
+    const userId = actorId(request);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const completed = await completeProductionBatch(client, id, body, userId);
+      await client.query("commit");
+      return reply.code(201).send(completed);
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.post("/production/:id/cancel", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const body = z.object({ reason: nullableText }).parse(request.body ?? {});
+    const result = await pool.query(
+      `update production_batches
+       set status = 'cancelled', cancelled_at = now(), waste_reason = coalesce($2, waste_reason)
+       where id = $1 and status in ('planned','started')
+       returning id`,
+      [id, body.reason ?? null]
+    );
+    if (!result.rows[0]) throw app.httpErrors.badRequest("Only planned or started production batches can be cancelled.");
+    return { ok: true };
+  });
+
   app.get("/production", async () => {
     const result = await pool.query(`
-      select pb.*, b.name as "blueprintName", p.name as "productName"
+      select pb.*, pb.ref_no as "refNo", pb.blueprint_id as "blueprintId", pb.blueprint_version as "blueprintVersion",
+        pb.quantity_to_produce as "quantityToProduce", pb.quantity_produced as "quantityProduced",
+        pb.quantity_wasted as "quantityWasted", pb.total_cost as "totalCost", pb.unit_cost as "unitCost",
+        pb.produced_at as "producedAt", pb.started_at as "startedAt", pb.completed_at as "completedAt",
+        pb.cancelled_at as "cancelledAt", pb.waste_reason as "wasteReason",
+        b.name as "blueprintName", p.name as "productName"
       from production_batches pb
       join product_blueprints b on b.id = pb.blueprint_id
       join products p on p.id = b.product_id
-      order by pb.produced_at desc
+      order by coalesce(pb.completed_at, pb.started_at, pb.produced_at) desc
     `);
     return result.rows;
   });
@@ -2228,6 +2569,19 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale',$1,$2,'POS sale')", [sale.rows[0].id, total]);
       if (body.discount) await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('discount','sale',$1,$2,'Sale discount')", [sale.rows[0].id, body.discount]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale',$1,$2,'Cost of goods sold')", [sale.rows[0].id, cogs]);
+      await postJournal(client, {
+        refType: "sale",
+        refId: String(sale.rows[0].id),
+        memo: "POS sale",
+        createdBy: userId,
+        lines: [
+          { account: body.paymentMethod === "credit" ? "accounts_receivable" : paymentAssetAccount(body.paymentMethod), debit: total },
+          ...(body.discount ? [{ account: "discounts", debit: body.discount, memo: "Sale discount" }] : []),
+          { account: "sales_revenue", credit: total + body.discount },
+          { account: "cogs", debit: cogs },
+          { account: "inventory_finished", credit: cogs }
+        ]
+      });
       const receiptPayload = { refNo: sale.rows[0].ref_no, customerId: body.customerId ?? null, items: receiptItems, subtotal, discount: body.discount, total, paymentMethod: body.paymentMethod };
       const receipt = await client.query("insert into receipts (sale_id, receipt_no, payload) values ($1,$2,$3) returning id, receipt_no", [sale.rows[0].id, ref("RCPT"), JSON.stringify(receiptPayload)]);
       await client.query("commit");
@@ -2373,6 +2727,18 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       await client.query("update returns set subtotal = $2, total = $3 where id = $1", [returnId, subtotal, subtotal]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','return',$1,$2,$3)", [returnId, -subtotal, "Sale return"]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','return',$1,$2,$3)", [returnId, -cogs, "COGS reversal"]);
+      await postJournal(client, {
+        refType: "return",
+        refId: returnId,
+        memo: "Sale return",
+        createdBy: userId,
+        lines: [
+          { account: "discounts", debit: subtotal, memo: "Sales return" },
+          { account: body.refundMethod === "credit" ? "accounts_receivable" : paymentAssetAccount(body.refundMethod), credit: subtotal },
+          { account: "inventory_finished", debit: cogs },
+          { account: "cogs", credit: cogs }
+        ]
+      });
 
       const totals = await client.query(`
         select coalesce(sum(si.quantity), 0) as sold, coalesce((select sum(ri.quantity) from return_items ri join sale_items x on x.id = ri.sale_item_id where x.sale_id = $1), 0) as returned
@@ -2429,6 +2795,18 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       await client.query("update sales set status = 'void' where id = $1", [id]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('sale_revenue','sale_void',$1,$2,$3)", [id, -revenue, body.reason]);
       await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale_void',$1,$2,$3)", [id, -cogs, "COGS reversal"]);
+      await postJournal(client, {
+        refType: "sale_void",
+        refId: id,
+        memo: body.reason,
+        createdBy: userId,
+        lines: [
+          { account: "discounts", debit: revenue, memo: "Voided sale" },
+          { account: String(saleRow.payment_method) === "credit" ? "accounts_receivable" : paymentAssetAccount(String(saleRow.payment_method)), credit: revenue },
+          { account: "inventory_finished", debit: cogs },
+          { account: "cogs", credit: cogs }
+        ]
+      });
       await client.query("commit");
       return { ok: true };
     } catch (error) {
@@ -2502,29 +2880,62 @@ export async function registerCoreRoutes(app: FastifyInstance) {
   app.post("/customers/:id/payment", async (request) => {
     const { id } = idParam.parse(request.params);
     const body = z.object({ amount: z.number().positive(), method: z.enum(["cash", "card", "mobile", "bank", "credit"]).default("cash"), note: nullableText }).parse(request.body);
-    await pool.query(
-      "insert into payments (party_type, customer_id, method, amount, note) values ('customer', $1, $2, $3, $4)",
-      [id, body.method, body.amount, body.note ?? null]
-    );
-    await pool.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('customer_payment','customer',$1,$2,'Customer payment')", [id, body.amount]);
-    return { ok: true };
+    const userId = actorId(request);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query(
+        "insert into payments (party_type, customer_id, method, amount, note) values ('customer', $1, $2, $3, $4)",
+        [id, body.method, body.amount, body.note ?? null]
+      );
+      await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('customer_payment','customer',$1,$2,'Customer payment')", [id, body.amount]);
+      await postJournal(client, {
+        refType: "customer_payment",
+        refId: id,
+        memo: "Customer payment",
+        createdBy: userId,
+        lines: [
+          { account: paymentAssetAccount(body.method), debit: body.amount },
+          { account: "accounts_receivable", credit: body.amount }
+        ]
+      });
+      await client.query("commit");
+      return { ok: true };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   app.get("/finance", async () => {
     const result = await pool.query(`
+      with account_totals as (
+        select ca.type, ca.system_key, coalesce(sum(jl.debit), 0) as debit, coalesce(sum(jl.credit), 0) as credit
+        from chart_accounts ca
+        left join journal_lines jl on jl.account_id = ca.id
+        group by ca.type, ca.system_key
+      ),
+      supplier_payment_total as (
+        select coalesce(sum(jl.debit), 0) as amount
+        from journal_lines jl
+        join journal_entries je on je.id = jl.journal_entry_id
+        join chart_accounts ca on ca.id = jl.account_id
+        where je.ref_type = 'supplier_payment' and ca.system_key = 'accounts_payable'
+      )
       select
-        coalesce(sum(amount) filter (where type = 'sale_revenue'), 0) as revenue,
-        coalesce(sum(amount) filter (where type = 'discount'), 0) as discounts,
-        coalesce(sum(amount) filter (where type = 'cogs'), 0) as cogs,
-        coalesce(sum(amount) filter (where type in ('supplier_invoice','purchase_expense','production_cost')), 0) as expenses,
-        coalesce(sum(amount) filter (where type = 'supplier_payment'), 0) as supplier_payments,
+        coalesce((select credit - debit from account_totals where system_key = 'sales_revenue'), 0) as revenue,
+        coalesce((select debit - credit from account_totals where system_key = 'discounts'), 0) as discounts,
+        coalesce((select debit - credit from account_totals where system_key = 'cogs'), 0) as cogs,
+        coalesce((select sum(debit - credit) from account_totals where type = 'expense' and system_key <> 'cogs'), 0) as expenses,
+        coalesce((select amount from supplier_payment_total), 0) as supplier_payments,
         coalesce((select sum(total - paid) from supplier_invoices where status <> 'void'), 0) as accounts_payable,
         coalesce((select sum(s.total) from sales s where s.customer_id is not null), 0) -
         coalesce((select sum(p.amount) from payments p where p.customer_id is not null), 0) as accounts_receivable,
         coalesce((select sum(quantity * i.average_cost) from warehouse_stock ws join items i on i.id = ws.item_id), 0) +
         coalesce((select sum(quantity * p.average_cost) from warehouse_stock ws join products p on p.id = ws.product_id), 0) as warehouse_value,
         coalesce((select sum(quantity * p.average_cost) from shop_stock ss join products p on p.id = ss.product_id), 0) as shop_value
-      from finance_transactions
     `);
     const row = result.rows[0];
     const revenue = money(row.revenue);
@@ -2544,7 +2955,22 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get("/finance/transactions", async () => (await pool.query("select * from finance_transactions order by created_at desc limit 200")).rows);
+  app.get("/finance/transactions", async () => (await pool.query(`
+    select jl.id,
+           je.posted_at as "postedAt",
+           je.ref_type as "refType",
+           je.ref_id as "refId",
+           ca.code as "accountCode",
+           ca.name as "accountName",
+           jl.debit,
+           jl.credit,
+           coalesce(jl.memo, je.memo) as memo
+    from journal_lines jl
+    join journal_entries je on je.id = jl.journal_entry_id
+    join chart_accounts ca on ca.id = jl.account_id
+    order by je.posted_at desc, jl.id desc
+    limit 300
+  `)).rows);
 
   app.get("/expenses", async () => {
     const result = await pool.query("select id, expense_date as date, category, description, amount, status from expenses order by created_at desc limit 200");
@@ -2553,17 +2979,38 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.post("/expenses", async (request, reply) => {
     const body = expenseSchema.parse(request.body ?? {});
-    const result = await pool.query(
-      `insert into expenses (supplier_invoice_id, category, description, amount, expense_date, status)
-       values ($1,$2,$3,$4,coalesce($5::date, current_date),$6::document_status)
-       returning id`,
-      [body.supplierInvoiceId ?? null, body.category, body.description ?? null, body.amount, body.expenseDate ?? null, body.status]
-    );
-    await pool.query(
-      "insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('purchase_expense','expense',$1,$2,$3)",
-      [result.rows[0].id, body.amount, body.description ?? body.category]
-    );
-    return reply.code(201).send({ id: result.rows[0].id });
+    const userId = actorId(request);
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      const result = await client.query(
+        `insert into expenses (supplier_invoice_id, category, description, amount, expense_date, status)
+         values ($1,$2,$3,$4,coalesce($5::date, current_date),$6::document_status)
+         returning id`,
+        [body.supplierInvoiceId ?? null, body.category, body.description ?? null, body.amount, body.expenseDate ?? null, body.status]
+      );
+      await client.query(
+        "insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('purchase_expense','expense',$1,$2,$3)",
+        [result.rows[0].id, body.amount, body.description ?? body.category]
+      );
+      await postJournal(client, {
+        refType: "expense",
+        refId: String(result.rows[0].id),
+        memo: body.description ?? body.category,
+        createdBy: userId,
+        lines: [
+          { account: "purchase_expense", debit: body.amount },
+          { account: body.status === "paid" ? "bank" : "accounts_payable", credit: body.amount }
+        ]
+      });
+      await client.query("commit");
+      return reply.code(201).send({ id: result.rows[0].id });
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   app.get("/loyalty", async () => {
@@ -2590,7 +3037,17 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.get("/reports", async () => {
     const [finance, topProducts, stockMoves] = await Promise.all([
-      pool.query("select type, coalesce(sum(amount), 0) as amount from finance_transactions group by type order by type"),
+      pool.query(`
+        select ca.system_key as type,
+               case
+                 when ca.type in ('asset','expense') then coalesce(sum(jl.debit - jl.credit), 0)
+                 else coalesce(sum(jl.credit - jl.debit), 0)
+               end as amount
+        from chart_accounts ca
+        left join journal_lines jl on jl.account_id = ca.id
+        group by ca.id
+        order by ca.code
+      `),
       pool.query(`select p.name, coalesce(sum(si.quantity), 0) as qty, coalesce(sum(si.line_total), 0) as revenue from sale_items si join products p on p.id = si.product_id group by p.id order by revenue desc limit 10`),
       pool.query("select ref_type, count(*) as count from stock_movements group by ref_type order by ref_type")
     ]);

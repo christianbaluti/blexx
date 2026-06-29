@@ -337,6 +337,10 @@ export const api = {
       productId: String(row.product_id ?? row.productId),
       productName: row.productName ? String(row.productName) : undefined,
       name: String(row.name),
+      version: Number(row.version ?? 1),
+      isActive: Boolean(row.isActive ?? row.is_active ?? true),
+      archivedAt: row.archivedAt || row.archived_at ? String(row.archivedAt ?? row.archived_at) : null,
+      parentBlueprintId: row.parentBlueprintId || row.parent_blueprint_id ? String(row.parentBlueprintId ?? row.parent_blueprint_id) : null,
       laborCost: Number(row.labor_cost ?? row.laborCost ?? 0),
       overhead: Number(row.overhead_cost ?? row.overhead ?? 0),
       outputQty: Number(row.output_qty ?? row.outputQty ?? 1),
@@ -360,7 +364,15 @@ export const api = {
       qtyProduced: Number(row.qtyProduced ?? row.quantity_produced ?? 0),
       qtyWaste: Number(row.qtyWaste ?? row.quantity_wasted ?? 0),
       totalCost: Number(row.totalCost ?? row.total_cost ?? 0),
-      producedAt: String(row.producedAt ?? row.produced_at ?? "")
+      producedAt: String(row.producedAt ?? row.produced_at ?? ""),
+      status: String(row.status ?? "completed") as ProductionBatch["status"],
+      blueprintVersion: Number(row.blueprintVersion ?? row.blueprint_version ?? 1),
+      quantityToProduce: Number(row.quantityToProduce ?? row.quantity_to_produce ?? 0),
+      unitCost: Number(row.unitCost ?? row.unit_cost ?? 0),
+      startedAt: row.startedAt || row.started_at ? String(row.startedAt ?? row.started_at) : null,
+      completedAt: row.completedAt || row.completed_at ? String(row.completedAt ?? row.completed_at) : null,
+      cancelledAt: row.cancelledAt || row.cancelled_at ? String(row.cancelledAt ?? row.cancelled_at) : null,
+      wasteReason: row.wasteReason || row.waste_reason ? String(row.wasteReason ?? row.waste_reason) : null
     })) as ProductionBatch[];
   },
   async grn() {
@@ -413,14 +425,14 @@ export const api = {
     const rows = await cached<Record<string, unknown>[]>("ledger", "/finance/transactions", []);
     return rows.map((row) => ({
       id: Number(row.id),
-      postedAt: String(row.created_at ?? row.createdAt),
-      refType: String(row.ref_type ?? row.refType ?? ""),
-      refId: row.ref_id ? String(row.ref_id) : null,
-      accountCode: String(row.type ?? ""),
-      accountName: String(row.type ?? ""),
-      debit: Number(row.amount ?? 0),
-      credit: 0,
-      memo: row.note ? String(row.note) : null
+      postedAt: String(row.postedAt ?? row.posted_at ?? row.created_at ?? ""),
+      refType: String(row.refType ?? row.ref_type ?? ""),
+      refId: row.refId || row.ref_id ? String(row.refId ?? row.ref_id) : null,
+      accountCode: String(row.accountCode ?? row.account_code ?? row.type ?? ""),
+      accountName: String(row.accountName ?? row.account_name ?? row.type ?? ""),
+      debit: Number(row.debit ?? row.amount ?? 0),
+      credit: Number(row.credit ?? 0),
+      memo: row.memo || row.note ? String(row.memo ?? row.note) : null
     }));
   },
   async statements() {
@@ -636,6 +648,12 @@ export const api = {
   createBom(payload: Record<string, unknown>) {
     return request<{ id: string }>("/blueprints", { method: "POST", body: JSON.stringify(payload) });
   },
+  updateBom(id: string, payload: Record<string, unknown>) {
+    return request<{ id: string; version: number }>(`/blueprints/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+  },
+  archiveBom(id: string) {
+    return request<{ ok: boolean }>(`/blueprints/${id}/archive`, { method: "POST" });
+  },
   createUser(payload: Record<string, unknown>) {
     return request<{ id: string }>("/users", { method: "POST", body: JSON.stringify(payload) });
   },
@@ -661,6 +679,38 @@ export const api = {
         producedBy: payload.producedBy ?? null
       })
     });
+  },
+  planProduction(payload: { bomId: string; quantityToProduce: number; extraCost?: number; sellingPrice?: number; wasteReason?: string | null }) {
+    return request<{ id: string; refNo: string }>("/production/plans", {
+      method: "POST",
+      body: JSON.stringify({
+        blueprintId: payload.bomId,
+        quantityToProduce: payload.quantityToProduce,
+        extraCost: payload.extraCost ?? 0,
+        sellingPrice: payload.sellingPrice,
+        wasteReason: payload.wasteReason ?? null
+      })
+    });
+  },
+  startProduction(id: string) {
+    return request<{ ok: boolean }>(`/production/${id}/start`, { method: "POST" });
+  },
+  completeProduction(id: string, payload: { quantityProduced: number; quantityWasted?: number; quantityToProduce?: number; extraCost?: number; sellingPrice?: number; wasteReason?: string | null; actualItems?: { itemId: string; consumedQty: number }[] }) {
+    return request<{ id: string; refNo: string; totalCost: number; unitCost: number }>(`/production/${id}/complete`, {
+      method: "POST",
+      body: JSON.stringify({
+        quantityToProduce: payload.quantityToProduce,
+        quantityProduced: payload.quantityProduced,
+        quantityWasted: payload.quantityWasted ?? 0,
+        extraCost: payload.extraCost ?? 0,
+        sellingPrice: payload.sellingPrice,
+        wasteReason: payload.wasteReason ?? null,
+        actualItems: payload.actualItems ?? []
+      })
+    });
+  },
+  cancelProduction(id: string, reason?: string | null) {
+    return request<{ ok: boolean }>(`/production/${id}/cancel`, { method: "POST", body: JSON.stringify({ reason: reason ?? null }) });
   },
   pushSync(payload: { deviceId: string; mutations: SyncMutation[] }) {
     return request<SyncPushResult>("/sync/push", {

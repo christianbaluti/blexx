@@ -75,7 +75,13 @@ export default function Boms() {
             <TableHeader columns={["BOM", "Finished product", "Output", "Components", "Labour", "Overhead"]} />
             {boms.map((bom) => (
               <View key={bom.id} style={styles.row}>
-                <Text style={styles.cellText}>{bom.name}</Text>
+                <View style={styles.cellBlock}>
+                  <Text style={styles.bomName}>{bom.name}</Text>
+                  <View style={styles.badgeRow}>
+                    <Badge tone={bom.isActive === false ? "muted" : "success"}>{bom.isActive === false ? "Archived" : "Active"}</Badge>
+                    <Badge tone="muted">v{bom.version ?? 1}</Badge>
+                  </View>
+                </View>
                 <Text style={styles.cellText}>{bom.productName ?? bom.productId}</Text>
                 <Text style={styles.rightCell}>{bom.outputQty ?? 1}</Text>
                 <View style={styles.componentCell}>
@@ -159,7 +165,10 @@ function PickerRail({ label, items, value, onChange }: { label: string; items: {
 const styles = StyleSheet.create({
   content: { gap: 14, padding: 18, width: "100%", maxWidth: 1240, alignSelf: "center" },
   row: { flexDirection: "row", alignItems: "center", gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, paddingHorizontal: 14, paddingVertical: 11 },
+  cellBlock: { flex: 1, minWidth: 140 },
   cellText: { flex: 1, minWidth: 140, color: colors.ink, fontWeight: "800" },
+  bomName: { color: colors.ink, fontWeight: "900" },
+  badgeRow: { flexDirection: "row", flexWrap: "wrap", gap: 5, marginTop: 5 },
   componentCell: { flex: 1.5, minWidth: 220, flexDirection: "row", flexWrap: "wrap", gap: 6 },
   rightCell: { flex: 1, minWidth: 90, color: colors.ink, fontFamily: typography.monoMedium, fontSize: 12, textAlign: "right" },
   backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 14 },

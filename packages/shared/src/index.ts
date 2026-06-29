@@ -206,6 +206,10 @@ export interface Bom {
   productId: Id;
   productName?: string;
   name: string;
+  version?: number;
+  isActive?: boolean;
+  archivedAt?: string | null;
+  parentBlueprintId?: Id | null;
   laborCost: number;
   overhead: number;
   outputQty?: number;
@@ -222,6 +226,14 @@ export interface ProductionBatch {
   qtyWaste: number;
   totalCost: number;
   producedAt: string;
+  status?: "planned" | "started" | "completed" | "cancelled";
+  blueprintVersion?: number;
+  quantityToProduce?: number;
+  unitCost?: number;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  cancelledAt?: string | null;
+  wasteReason?: string | null;
 }
 
 export interface Expense {

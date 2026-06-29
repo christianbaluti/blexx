@@ -29,11 +29,14 @@
     "db:setup": "pnpm run db:create && pnpm run db:migrate && pnpm run db:seed",
     "db:migrate": "pnpm --filter @blex/api run db:migrate",
     "db:seed": "pnpm --filter @blex/api run db:seed",
+    "test:api": "pnpm --filter @blex/api run test",
+    "test:smoke": "playwright test",
     "lint": "pnpm -r --if-present run lint",
     "typecheck": "pnpm run build:shared && pnpm -r --if-present run typecheck",
     "format": "prettier --write ."
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^22.16.5",
     "prettier": "^3.7.3",
     "typescript": "^5.8.3"

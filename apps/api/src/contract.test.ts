@@ -27,7 +27,14 @@ const clientReferencedRoutes = [
   ["POST", "/transfers/:id/cancel"],
   ["POST", "/sales/:id/void"],
   ["GET", "/settings/branding"],
-  ["PATCH", "/settings/branding"]
+  ["PATCH", "/settings/branding"],
+  ["PATCH", "/blueprints/:id"],
+  ["POST", "/blueprints/:id/archive"],
+  ["POST", "/production/plans"],
+  ["POST", "/production/:id/start"],
+  ["POST", "/production/:id/complete"],
+  ["POST", "/production/:id/cancel"],
+  ["GET", "/finance/transactions"]
 ] as const;
 
 test("backend implements client-referenced endpoints", async () => {
