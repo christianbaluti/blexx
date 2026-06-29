@@ -556,6 +556,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     const body = syncPushSchema.parse(request.body ?? {});
     const userId = actorId(request);
     let accepted = 0;
+    const acceptedIds: string[] = [];
     const conflicts: Record<string, unknown>[] = [];
 
     for (const mutation of body.mutations) {
@@ -564,7 +565,10 @@ export async function registerCoreRoutes(app: FastifyInstance) {
         await client.query("begin");
         const existing = await client.query("select id, status from sync_mutations where id = $1", [mutation.id]);
         if (existing.rows[0]) {
-          if (existing.rows[0].status === "accepted") accepted += 1;
+          if (existing.rows[0].status === "accepted") {
+            accepted += 1;
+            acceptedIds.push(mutation.id);
+          }
           await client.query("commit");
           continue;
         }
@@ -583,6 +587,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
           );
           await client.query("update sync_mutations set status = 'accepted', applied_at = now() where id = $1", [mutation.id]);
           accepted += 1;
+          acceptedIds.push(mutation.id);
         } else if (mutation.operation === "create" && ["sale", "sales"].includes(mutation.entity)) {
           const payload = mutation.payload as Record<string, unknown>;
           const rawLines = Array.isArray(payload.items) ? payload.items : Array.isArray(payload.lines) ? payload.lines : [];
@@ -649,6 +654,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
           await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale',$1,$2,'Offline COGS')", [sale.rows[0].id, cogs]);
           await client.query("update sync_mutations set status = 'accepted', applied_at = now() where id = $1", [mutation.id]);
           accepted += 1;
+          acceptedIds.push(mutation.id);
         } else {
           const conflict = await client.query(
             `insert into sync_conflicts (device_id, entity, entity_id, local_payload, reason)
@@ -680,7 +686,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
       }
     }
 
-    return { accepted, conflicts };
+    return { accepted, acceptedIds, conflicts };
   });
 
   app.get("/sync/pull", async () => {

@@ -12,14 +12,18 @@ import { useAuth } from "../../src/lib/auth";
 import { colors, typography } from "../../src/lib/theme";
 import { createOfflineMutation } from "../../src/lib/syncEngine";
 import { enqueueMutation } from "../../src/lib/localDb";
+import { useNetworkStatus } from "../../src/lib/network";
 import { shareReceipt } from "../../src/lib/receiptService";
 
 type CartLine = { product: Product; qty: number };
+type CheckoutResult = { id: string; refNo: string; total: number; queued?: boolean };
+type SalePayload = Parameters<typeof api.createSale>[0];
 
 export default function Pos() {
   const auth = useAuth();
   const queryClient = useQueryClient();
   const { width } = useWindowDimensions();
+  const online = useNetworkStatus();
   const compact = width < 940;
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<string>("all");
@@ -46,24 +50,37 @@ export default function Pos() {
   const total = Math.max(0, subtotal - discountAmount);
 
   const checkout = useMutation({
-    mutationFn: (payment: Sale["payment"]) =>
-      api.createSale({
+    mutationFn: async (payment: Sale["payment"]): Promise<CheckoutResult> => {
+      const payload = {
         cashierId: auth.user!.id,
         customerId: customerId || null,
         payment,
         discount: discountAmount,
         lines: cart.map((line) => ({ productId: line.product.id, qty: line.qty, price: line.product.price, discount: 0 }))
-      }),
+      };
+      if (!online) return queueOfflineSale(payment, payload);
+      try {
+        return await api.createSale(payload);
+      } catch (error) {
+        if (isNetworkError(error)) return queueOfflineSale(payment, payload);
+        throw error;
+      }
+    },
     onSuccess: async (sale, payment) => {
-      await shareReceipt({
-        refNo: sale.refNo,
-        total: sale.total,
-        subtotal,
-        discount: discountAmount,
-        payment,
-        customerName: customers.find((customer) => customer.id === customerId)?.name ?? "Walk-in customer",
-        lines: cart.map((line) => ({ productId: line.product.id, name: line.product.name, qty: line.qty, price: line.product.price, discount: 0 }))
-      }).catch(() => undefined);
+      if (sale.queued) {
+        applyLocalStockDeduction(cart);
+        Alert.alert("Sale queued", "The sale was saved on this device and will sync when the backend is reachable.");
+      } else {
+        await shareReceipt({
+          refNo: sale.refNo,
+          total: sale.total,
+          subtotal,
+          discount: discountAmount,
+          payment,
+          customerName: customers.find((customer) => customer.id === customerId)?.name ?? "Walk-in customer",
+          lines: cart.map((line) => ({ productId: line.product.id, name: line.product.name, qty: line.qty, price: line.product.price, discount: 0 }))
+        }).catch(() => undefined);
+      }
       setCart([]);
       setDiscount("0");
       await Promise.all([
@@ -74,20 +91,44 @@ export default function Pos() {
         queryClient.invalidateQueries({ queryKey: ["customers"] })
       ]);
     },
-    onError: (_error, payment) => {
-      enqueueMutation(createOfflineMutation("sale", "create", {
-        cashierId: auth.user!.id,
-        customerId: customerId || null,
-        payment,
-        discount: discountAmount,
-        lines: cart.map((line) => ({ productId: line.product.id, qty: line.qty, price: line.product.price, discount: 0 })),
-        subtotal,
-        total
-      }));
-      setCart([]);
-      setDiscount("0");
+    onError: (error) => {
+      Alert.alert("Could not complete sale", error instanceof Error ? error.message : "Please check the sale and try again.");
     }
   });
+
+  async function queueOfflineSale(payment: Sale["payment"], payload: SalePayload): Promise<CheckoutResult> {
+    if (payment === "credit") {
+      throw new Error("Credit sales need a live backend connection so the customer limit can be checked.");
+    }
+    const mutation = createOfflineMutation("sale", "create", {
+      ...payload,
+      paymentMethod: payment === "voucher" ? "cash" : payment,
+      subtotal,
+      total
+    });
+    await enqueueMutation(mutation);
+    return {
+      id: mutation.id,
+      refNo: `PENDING-${mutation.id.slice(0, 8).toUpperCase()}`,
+      total,
+      queued: true
+    };
+  }
+
+  function applyLocalStockDeduction(lines: CartLine[]) {
+    queryClient.setQueryData<Product[]>(["products"], (current) =>
+      current?.map((product) => {
+        const line = lines.find((entry) => entry.product.id === product.id);
+        if (!line) return product;
+        const nextStock = Math.max(0, product.stock - line.qty);
+        return {
+          ...product,
+          stock: nextStock,
+          shopStock: Math.max(0, Number((product as Product & { shopStock?: number }).shopStock ?? product.stock) - line.qty)
+        } as Product;
+      }) ?? current
+    );
+  }
 
   if (!auth.isAuthenticated) return <Login />;
 
@@ -132,8 +173,8 @@ export default function Pos() {
             <Text style={styles.cashier}>Cashier: {auth.user?.name}</Text>
           </View>
           <Pressable style={styles.headerPill} onPress={() => compact && setCompactPane(compactPane === "items" ? "cart" : "items")}>
-            <MaterialCommunityIcons name="pause-circle-outline" size={17} color={colors.ink} />
-            <Text style={styles.headerPillText}>{compact ? `${cart.length} cart` : "Held carts"}</Text>
+            <MaterialCommunityIcons name={online ? "cloud-check-outline" : "cloud-off-outline"} size={17} color={colors.ink} />
+            <Text style={styles.headerPillText}>{online ? (compact ? `${cart.length} cart` : "Online") : "Offline"}</Text>
           </Pressable>
           <Pressable style={styles.holdButton} onPress={() => setCart([])}>
             <MaterialCommunityIcons name="content-save-outline" size={17} color="#FFF7EF" />
@@ -271,13 +312,17 @@ export default function Pos() {
               <Button onPress={() => checkout.mutate("cash")} disabled={!cart.length || checkout.isPending}>Cash</Button>
               <Button variant="outline" onPress={() => checkout.mutate("card")} disabled={!cart.length || checkout.isPending}>Card</Button>
               <Button variant="outline" onPress={() => checkout.mutate("mobile")} disabled={!cart.length || checkout.isPending}>Mobile</Button>
-              <Button variant="outline" onPress={() => checkout.mutate("credit")} disabled={!cart.length || checkout.isPending || !customerId}>Credit</Button>
+              <Button variant="outline" onPress={() => checkout.mutate("credit")} disabled={!cart.length || checkout.isPending || !customerId || !online}>Credit</Button>
             </View>
           </View> : null}
         </View>
       </View>
     </Screen>
   );
+}
+
+function isNetworkError(error: unknown) {
+  return error instanceof Error && error.message.includes("Cannot reach Blex API");
 }
 
 const styles = StyleSheet.create({

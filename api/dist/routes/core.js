@@ -490,6 +490,7 @@ export async function registerCoreRoutes(app) {
         const body = syncPushSchema.parse(request.body ?? {});
         const userId = actorId(request);
         let accepted = 0;
+        const acceptedIds = [];
         const conflicts = [];
         for (const mutation of body.mutations) {
             const client = await pool.connect();
@@ -497,8 +498,10 @@ export async function registerCoreRoutes(app) {
                 await client.query("begin");
                 const existing = await client.query("select id, status from sync_mutations where id = $1", [mutation.id]);
                 if (existing.rows[0]) {
-                    if (existing.rows[0].status === "accepted")
+                    if (existing.rows[0].status === "accepted") {
                         accepted += 1;
+                        acceptedIds.push(mutation.id);
+                    }
                     await client.query("commit");
                     continue;
                 }
@@ -509,6 +512,7 @@ export async function registerCoreRoutes(app) {
                     await client.query("insert into customers (name, phone, email, address, credit_limit, loyalty_points) values ($1,$2,$3,$4,$5,$6)", [payload.name, payload.phone ?? null, payload.email ?? null, payload.address ?? null, payload.creditLimit ?? 0, payload.loyaltyPoints ?? 0]);
                     await client.query("update sync_mutations set status = 'accepted', applied_at = now() where id = $1", [mutation.id]);
                     accepted += 1;
+                    acceptedIds.push(mutation.id);
                 }
                 else if (mutation.operation === "create" && ["sale", "sales"].includes(mutation.entity)) {
                     const payload = mutation.payload;
@@ -569,6 +573,7 @@ export async function registerCoreRoutes(app) {
                     await client.query("insert into finance_transactions (type, ref_type, ref_id, amount, note) values ('cogs','sale',$1,$2,'Offline COGS')", [sale.rows[0].id, cogs]);
                     await client.query("update sync_mutations set status = 'accepted', applied_at = now() where id = $1", [mutation.id]);
                     accepted += 1;
+                    acceptedIds.push(mutation.id);
                 }
                 else {
                     const conflict = await client.query(`insert into sync_conflicts (device_id, entity, entity_id, local_payload, reason)
@@ -593,7 +598,7 @@ export async function registerCoreRoutes(app) {
                 client.release();
             }
         }
-        return { accepted, conflicts };
+        return { accepted, acceptedIds, conflicts };
     });
     app.get("/sync/pull", async () => {
         const [products, customers, shopStock] = await Promise.all([

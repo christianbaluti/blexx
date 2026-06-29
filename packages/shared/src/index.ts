@@ -388,6 +388,12 @@ export interface SyncHealth {
   lastSyncedAt: string | null;
 }
 
+export interface SyncPushResult {
+  accepted: number;
+  acceptedIds: string[];
+  conflicts: SyncConflict[];
+}
+
 export interface BackupSnapshot {
   id: string;
   name: string;

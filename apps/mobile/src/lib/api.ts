@@ -28,6 +28,7 @@ import type {
   SyncConflict,
   SyncHealth,
   SyncMutation,
+  SyncPushResult,
   Transfer,
   UserAccount
 } from "@blex/shared";
@@ -656,7 +657,7 @@ export const api = {
     });
   },
   pushSync(payload: { deviceId: string; mutations: SyncMutation[] }) {
-    return request<{ accepted: number; conflicts: SyncConflict[] }>("/sync/push", {
+    return request<SyncPushResult>("/sync/push", {
       method: "POST",
       body: JSON.stringify(payload)
     });

@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import type { SyncHealth, SyncMutation } from "@blex/shared";
 import { api } from "./api";
-import { listOutboxAsync, markOutboxSynced, outboxCounts } from "./localDb";
+import { getDeviceId, getDeviceIdAsync, listOutboxAsync, markOutboxConflicted, markOutboxFailed, markOutboxSynced, outboxCounts } from "./localDb";
 import { useNetworkStatus } from "./network";
 
 export function useSyncEngine() {
@@ -16,8 +16,15 @@ export function useSyncEngine() {
     mutationFn: async () => {
       const mutations = await listOutboxAsync();
       if (!mutations.length) return { accepted: 0, conflicts: [] };
-      const result = await api.pushSync({ deviceId: getDeviceId(), mutations });
-      markOutboxSynced(mutations.map((item) => item.id));
+      const result = await api.pushSync({ deviceId: await getDeviceIdAsync(), mutations });
+      const acceptedIds = result.acceptedIds ?? [];
+      const conflictIds = result.conflicts.map((conflict) => conflict.entityId).filter(Boolean);
+      const unresolvedIds = mutations
+        .map((mutation) => mutation.id)
+        .filter((id) => !acceptedIds.includes(id) && !conflictIds.includes(id));
+      markOutboxSynced(acceptedIds);
+      markOutboxConflicted(conflictIds);
+      markOutboxFailed(unresolvedIds);
       return result;
     },
     onSuccess: async () => {
@@ -54,7 +61,7 @@ export function useSyncEngine() {
 
 export function createOfflineMutation(entity: string, operation: SyncMutation["operation"], payload: unknown): Omit<SyncMutation, "attempts" | "status"> {
   return {
-    id: `${entity}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    id: randomUuid(),
     entity,
     operation,
     payload,
@@ -63,6 +70,15 @@ export function createOfflineMutation(entity: string, operation: SyncMutation["o
   };
 }
 
-function getDeviceId() {
-  return "local-device";
+function randomUuid() {
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
