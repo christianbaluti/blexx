@@ -15,7 +15,8 @@ const migrations = [
   "006_core_reset.sql",
   "007_grn_receiving_flow.sql",
   "008_item_images_payment_pop.sql",
-  "009_v1_foundation_gaps.sql"
+  "009_v1_foundation_gaps.sql",
+  "010_real_backup_payloads.sql"
 ];
 
 async function runSql(path: string) {

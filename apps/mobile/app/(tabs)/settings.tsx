@@ -3,11 +3,12 @@ import { defaultAppBranding, defaultAppSettings, type AppBranding, type AppSetti
 import * as ImagePicker from "expo-image-picker";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { brandMarkSource } from "../../src/components/brand";
 import { Badge, CommandButton, MetricCard, PageHeader, TabBar, TableCard, TableHeader } from "../../src/components/feature-ui";
 import { Card, Field, Screen } from "../../src/components/ui";
 import { api } from "../../src/lib/api";
+import { saveTextFile } from "../../src/lib/exportData";
 import { colors, typography } from "../../src/lib/theme";
 
 type SettingsTab = "company" | "branding" | "users" | "security" | "sync" | "integrations" | "backups";
@@ -53,6 +54,16 @@ export default function Settings() {
   useEffect(() => {
     setSettingsForm(settings);
   }, [settings]);
+
+  async function downloadBackup(id: string) {
+    try {
+      const backup = await api.backupDetail(id);
+      const filename = `${backup.name.replace(/[^\w.-]+/g, "-")}.json`;
+      await saveTextFile(filename, JSON.stringify(backup.payload, null, 2), "application/json");
+    } catch (error) {
+      Alert.alert("Could not download backup", error instanceof Error ? error.message : "Please try again.");
+    }
+  }
 
   async function pickLogo() {
     setBrandError(null);
@@ -279,12 +290,20 @@ export default function Settings() {
           <>
             <View style={styles.alignEnd}><CommandButton icon="database-export-outline" label={createBackup.isPending ? "Creating..." : "Create backup"} primary onPress={() => createBackup.mutate()} /></View>
             <TableCard>
-              <TableHeader columns={["Name", "Created", "Status"]} />
+              <TableHeader columns={["Name", "Created", "Size", "Status", "File"]} />
               {backups.map((backup) => (
                 <View key={backup.id} style={styles.row}>
                   <Text style={styles.cellText}>{backup.name}</Text>
                   <Text style={styles.mutedText}>{new Date(backup.createdAt).toLocaleString()}</Text>
-                  <View style={styles.cell}><Badge tone="success">{backup.status}</Badge></View>
+                  <Text style={styles.mutedText}>{formatBytes(backup.sizeBytes)}</Text>
+                  <View style={styles.cell}><Badge tone={backup.status === "ready" ? "success" : backup.status === "failed" ? "danger" : "muted"}>{backup.status}</Badge></View>
+                  <View style={styles.cell}>
+                    {backup.status === "ready" ? (
+                      <CommandButton icon="download-outline" label="Download" onPress={() => downloadBackup(backup.id)} />
+                    ) : (
+                      <Text style={styles.meta}>{backup.error ?? backup.format ?? "-"}</Text>
+                    )}
+                  </View>
                 </View>
               ))}
             </TableCard>
@@ -293,6 +312,13 @@ export default function Settings() {
       </ScrollView>
     </Screen>
   );
+}
+
+function formatBytes(value: number) {
+  if (!value) return "0 B";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function IntegrationCard({ icon, title, env, status }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; title: string; env: string; status: string }) {

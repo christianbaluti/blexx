@@ -46,6 +46,35 @@ function pdfText(value: unknown) {
   return String(value ?? "").trim();
 }
 
+function quoteIdent(value: string) {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value)) throw new Error(`Unsafe SQL identifier: ${value}`);
+  return `"${value.replace(/"/g, "\"\"")}"`;
+}
+
+async function createJsonBackup(client: DbClient) {
+  const tableResult = await client.query(`
+    select table_name as name
+    from information_schema.tables
+    where table_schema = 'public'
+      and table_type = 'BASE TABLE'
+      and table_name <> 'backup_records'
+    order by table_name
+  `);
+  const tables: Record<string, unknown[]> = {};
+
+  for (const table of tableResult.rows) {
+    const tableName = String(table.name);
+    const rows = await client.query(`select to_jsonb(row_data) as row from (select * from ${quoteIdent(tableName)}) row_data`);
+    tables[tableName] = rows.rows.map((row) => row.row);
+  }
+
+  return {
+    format: "blex-json-backup-v1",
+    createdAt: new Date().toISOString(),
+    tables
+  };
+}
+
 function createPurchaseOrderPdf(order: Record<string, unknown>, items: Record<string, unknown>[]) {
   return new Promise<Buffer>((resolve, reject) => {
     const doc = new PDFDocument({ size: "A4", margin: 42, bufferPages: true });
@@ -724,7 +753,7 @@ export async function registerCoreRoutes(app: FastifyInstance) {
 
   app.get("/backup", async () => {
     const result = await pool.query(`
-      select id, name, created_at as "createdAt", size_bytes as "sizeBytes", status
+      select id, name, format, path, created_at as "createdAt", completed_at as "completedAt", size_bytes as "sizeBytes", status, error
       from backup_records
       order by created_at desc
       limit 100
@@ -732,14 +761,54 @@ export async function registerCoreRoutes(app: FastifyInstance) {
     return result.rows.map((row) => ({ ...row, sizeBytes: Number(row.sizeBytes) }));
   });
 
+  app.get("/backup/:id", async (request) => {
+    const { id } = idParam.parse(request.params);
+    const result = await pool.query(`
+      select id, name, format, path, payload_json as payload, created_at as "createdAt",
+             completed_at as "completedAt", size_bytes as "sizeBytes", status, error
+      from backup_records
+      where id = $1
+    `, [id]);
+    const row = result.rows[0];
+    if (!row) throw app.httpErrors.notFound("Backup not found");
+    return { ...row, sizeBytes: Number(row.sizeBytes) };
+  });
+
   app.post("/backup", async (request) => {
-    const result = await pool.query(
-      `insert into backup_records (name, status, size_bytes, created_by, completed_at)
-       values ($1, 'ready', 0, $2, now())
-       returning id, name, created_at as "createdAt", size_bytes as "sizeBytes", status`,
-      [`Manual backup ${new Date().toISOString()}`, actorId(request)]
-    );
-    return { ...result.rows[0], sizeBytes: Number(result.rows[0].sizeBytes) };
+    const client = await pool.connect();
+    const backupName = `Manual backup ${new Date().toISOString()}`;
+    try {
+      await client.query("begin");
+      const created = await client.query(
+        `insert into backup_records (name, status, size_bytes, created_by, format)
+         values ($1, 'running', 0, $2, 'blex-json-backup-v1')
+         returning id`,
+        [backupName, actorId(request)]
+      );
+      const backupId = String(created.rows[0].id);
+      const payload = await createJsonBackup(client);
+      const payloadText = JSON.stringify(payload);
+      const updated = await client.query(
+        `update backup_records
+         set status = 'ready', payload_json = $2::jsonb, path = $3, size_bytes = $4, completed_at = now(), error = null
+         where id = $1
+         returning id, name, format, path, created_at as "createdAt", completed_at as "completedAt", size_bytes as "sizeBytes", status, error`,
+        [backupId, payloadText, `postgres://backup_records/${backupId}`, Buffer.byteLength(payloadText, "utf8")]
+      );
+      await client.query("commit");
+      return { ...updated.rows[0], sizeBytes: Number(updated.rows[0].sizeBytes) };
+    } catch (error) {
+      await client.query("rollback");
+      const message = error instanceof Error ? error.message : "Backup failed";
+      await pool.query(
+        `insert into backup_records (name, status, size_bytes, created_by, completed_at, error)
+         values ($1, 'failed', 0, $2, now(), $3)`,
+        [backupName, actorId(request), message]
+      ).catch(() => undefined);
+      throw app.httpErrors.internalServerError("Backup failed. Check server logs and backup records.");
+    } finally {
+      client.release();
+    }
   });
 
   app.get("/dashboard", async () => {

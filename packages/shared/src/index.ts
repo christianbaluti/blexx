@@ -398,8 +398,12 @@ export interface BackupSnapshot {
   id: string;
   name: string;
   createdAt: string;
+  completedAt?: string | null;
   sizeBytes: number;
   status: "ready" | "running" | "failed";
+  format?: string;
+  path?: string | null;
+  error?: string | null;
 }
 
 export interface AppBranding {

@@ -16,6 +16,7 @@ const clientReferencedRoutes = [
   ["POST", "/sync/conflicts/:id/resolve"],
   ["GET", "/backup"],
   ["POST", "/backup"],
+  ["GET", "/backup/:id"],
   ["GET", "/categories"],
   ["POST", "/expenses"],
   ["GET", "/stock-counts"],

@@ -178,6 +178,8 @@ https://blexx-api-ms2z.vercel.app
 
 Set `EXPO_PUBLIC_API_URL` only when you need to point a build at another backend.
 
+Backups are documented in [docs/operations-backups.md](docs/operations-backups.md). The app can create downloadable JSON backups from Settings, while Neon provider snapshots should remain the production disaster-recovery source.
+
 For local backend development with Expo Go, opt in explicitly:
 
 ```bash

@@ -456,6 +456,9 @@ export const api = {
   }),
   conflicts: () => cached<SyncConflict[]>("sync-conflicts", "/sync/conflicts", []),
   backups: () => cached<BackupSnapshot[]>("backups", "/backup", []),
+  backupDetail(id: string) {
+    return request<BackupSnapshot & { payload: unknown }>(`/backup/${id}`);
+  },
   createSale(payload: {
     cashierId: string;
     customerId?: string | null;
