@@ -1,9 +1,12 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import type { NotificationItem } from "@blex/shared";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router, Slot, usePathname } from "expo-router";
 import { useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BrandLockup, StartupScreen } from "./brand";
+import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { colors, typography } from "../lib/theme";
 
@@ -56,13 +59,21 @@ export function AppShell() {
   const isCompact = width < 820;
   const compactTopInset = isCompact ? Math.max(insets.top, 54) : 0;
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const auth = useAuth();
+  const queryClient = useQueryClient();
   const pathname = usePathname().replace("/(tabs)", "");
+  const { data: notifications = [] } = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, enabled: auth.isAuthenticated, refetchInterval: 60_000 });
+  const markRead = useMutation({
+    mutationFn: api.markNotificationRead,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] })
+  });
 
   if (auth.loading) return <StartupScreen label="Restoring your secure session" />;
   if (!auth.isAuthenticated) return <Slot />;
   const nav = <Navigation onNavigate={() => setDrawerOpen(false)} />;
   const title = routeTitles[pathname] ?? "Dashboard";
+  const unreadCount = notifications.filter((item) => !item.read).length;
 
   return (
     <View style={styles.root}>
@@ -84,6 +95,14 @@ export function AppShell() {
               <TextInput placeholder="Search products, sales, customers" placeholderTextColor={colors.muted} style={styles.searchInput} />
             </View>
           ) : null}
+          <Pressable style={styles.iconButton} onPress={() => setNotificationsOpen(true)}>
+            <MaterialCommunityIcons name="bell-outline" size={20} color={colors.ink} />
+            {unreadCount ? (
+              <View style={styles.notificationDot}>
+                <Text style={styles.notificationDotText}>{unreadCount > 9 ? "9+" : unreadCount}</Text>
+              </View>
+            ) : null}
+          </Pressable>
         </View>
         <Slot />
       </View>
@@ -92,7 +111,40 @@ export function AppShell() {
           <Pressable style={styles.drawer}>{nav}</Pressable>
         </Pressable>
       </Modal>
+      <Modal visible={notificationsOpen} transparent animationType="fade" onRequestClose={() => setNotificationsOpen(false)}>
+        <Pressable style={styles.backdrop} onPress={() => setNotificationsOpen(false)}>
+          <Pressable style={styles.notificationPanel}>
+            <View style={styles.notificationHeader}>
+              <Text style={styles.notificationTitle}>Notifications</Text>
+              <Pressable style={styles.iconButton} onPress={() => setNotificationsOpen(false)}>
+                <MaterialCommunityIcons name="close" size={18} color={colors.ink} />
+              </Pressable>
+            </View>
+            <ScrollView contentContainerStyle={styles.notificationList}>
+              {notifications.length ? notifications.map((item) => (
+                <NotificationRow key={item.id} item={item} onPress={() => !item.read && markRead.mutate(item.id)} />
+              )) : (
+                <Text style={styles.notificationBody}>No notifications right now.</Text>
+              )}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
+  );
+}
+
+function NotificationRow({ item, onPress }: { item: NotificationItem; onPress: () => void }) {
+  const severityColor = item.severity === "critical" ? colors.danger : item.severity === "warning" ? colors.accent : colors.muted;
+  return (
+    <Pressable style={[styles.notificationItem, !item.read && styles.notificationItemUnread]} onPress={onPress}>
+      <View style={styles.notificationRowTitle}>
+        <View style={[styles.severityDot, { backgroundColor: severityColor }]} />
+        <Text style={styles.notificationItemTitle} numberOfLines={2}>{item.title}</Text>
+      </View>
+      {item.body ? <Text style={styles.notificationBody}>{item.body}</Text> : null}
+      <Text style={styles.notificationMeta}>{new Date(item.ts).toLocaleString()}</Text>
+    </Pressable>
   );
 }
 
@@ -182,6 +234,8 @@ const styles = StyleSheet.create({
   notificationList: { padding: 10, gap: 8 },
   notificationItem: { borderWidth: 1, borderColor: colors.line, borderRadius: 7, padding: 11, backgroundColor: colors.surface },
   notificationItemUnread: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
+  notificationRowTitle: { flexDirection: "row", alignItems: "center", gap: 8 },
+  severityDot: { width: 8, height: 8, borderRadius: 4 },
   notificationItemTitle: { color: colors.ink, fontFamily: typography.sansBlack, fontSize: 13 },
   notificationBody: { color: colors.muted, fontFamily: typography.sansRegular, fontSize: 12, marginTop: 4 },
   notificationMeta: { color: colors.muted, fontFamily: typography.sansMedium, fontSize: 10, marginTop: 7 },

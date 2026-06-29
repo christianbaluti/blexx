@@ -60,6 +60,20 @@ async function createJsonBackup(client) {
         tables
     };
 }
+async function upsertGeneratedNotifications(rows) {
+    if (!rows.length)
+        return;
+    await Promise.all(rows.map((row) => pool.query(`insert into notifications (source_key, type, severity, title, body, entity, entity_id, status)
+     values ($1,$2,$3,$4,$5,$6,$7,$8)
+     on conflict (source_key) do update
+       set type = excluded.type,
+           severity = excluded.severity,
+           title = excluded.title,
+           body = excluded.body,
+           entity = excluded.entity,
+           entity_id = excluded.entity_id,
+           status = excluded.status`, [row.sourceKey, row.type, row.severity, row.title, row.body, row.entity ?? null, row.entityId ?? null, row.status ?? "pending"])));
+}
 function createPurchaseOrderPdf(order, items) {
     return new Promise((resolve, reject) => {
         const doc = new PDFDocument({ size: "A4", margin: 42, bufferPages: true });
@@ -748,20 +762,18 @@ export async function registerCoreRoutes(app) {
         };
     });
     app.get("/notifications", async (request) => {
-        const [saved, lowStock, overdueInvoices] = await Promise.all([
+        const [lowStock, overdueInvoices, syncConflicts, failedBackups] = await Promise.all([
             pool.query(`
-        select id, created_at as ts, type, title, body, read_at is not null as read, 'in_app' as channel, status
-        from notifications
-        where user_id is null or user_id = $1
-        order by created_at desc
-        limit 100
-      `, [actorId(request)]).catch(() => ({ rows: [] })),
-            pool.query(`
-        select p.id, p.name, coalesce(ss.quantity, 0) as quantity, p.reorder_level as "reorderLevel"
+        select 'product' as entity, p.id, p.name, coalesce(ss.quantity, 0) as quantity, p.reorder_level as "reorderLevel", 'shop' as location
         from products p
         left join shop_stock ss on ss.product_id = p.id
         where p.reorder_level > 0 and coalesce(ss.quantity, 0) <= p.reorder_level
-        order by coalesce(ss.quantity, 0), p.name
+        union all
+        select 'item' as entity, i.id, i.name, coalesce(ws.quantity, 0) as quantity, i.reorder_level as "reorderLevel", 'warehouse' as location
+        from items i
+        left join warehouse_stock ws on ws.item_id = i.id
+        where i.reorder_level > 0 and coalesce(ws.quantity, 0) <= i.reorder_level
+        order by quantity, name
         limit 25
       `),
             pool.query(`
@@ -770,31 +782,71 @@ export async function registerCoreRoutes(app) {
         where due_date < current_date and status in ('open', 'partial')
         order by due_date
         limit 25
+      `),
+            pool.query(`
+        select id, entity, entity_id, reason
+        from sync_conflicts
+        where status = 'open'
+        order by created_at desc
+        limit 25
+      `),
+            pool.query(`
+        select id, name, error
+        from backup_records
+        where status = 'failed'
+        order by created_at desc
+        limit 25
       `)
         ]);
-        const dynamic = [
+        const generatedNotifications = [
             ...lowStock.rows.map((row) => ({
-                id: `low-stock-${row.id}`,
-                ts: new Date().toISOString(),
+                sourceKey: `low-stock:${row.entity}:${row.id}`,
                 type: "low_stock",
-                title: `${row.name} is low in shop stock`,
+                severity: (numberify(row.quantity) <= 0 ? "critical" : "warning"),
+                title: `${row.name} is low in ${row.location} stock`,
                 body: `${numberify(row.quantity)} available; reorder point is ${numberify(row.reorderLevel)}.`,
-                read: false,
-                channel: "in_app",
-                status: "pending"
+                entity: String(row.entity),
+                entityId: String(row.id)
             })),
             ...overdueInvoices.rows.map((row) => ({
-                id: `overdue-invoice-${row.id}`,
-                ts: new Date().toISOString(),
+                sourceKey: `supplier-invoice-overdue:${row.id}`,
                 type: "system",
+                severity: "warning",
                 title: `Supplier invoice ${row.ref_no} is overdue`,
                 body: `${formatMoney(numberify(row.total) - numberify(row.paid))} remains payable.`,
-                read: false,
-                channel: "in_app",
-                status: "pending"
+                entity: "supplier_invoice",
+                entityId: String(row.id)
+            })),
+            ...syncConflicts.rows.map((row) => ({
+                sourceKey: `sync-conflict:${row.id}`,
+                type: "system",
+                severity: "critical",
+                title: "Offline sync conflict needs review",
+                body: String(row.reason ?? "A queued offline change could not be applied."),
+                entity: "sync_conflict",
+                entityId: String(row.id)
+            })),
+            ...failedBackups.rows.map((row) => ({
+                sourceKey: `backup-failed:${row.id}`,
+                type: "system",
+                severity: "critical",
+                title: `Backup failed: ${row.name}`,
+                body: String(row.error ?? "The backup could not be completed."),
+                entity: "backup",
+                entityId: String(row.id),
+                status: "failed"
             }))
         ];
-        return [...saved.rows, ...dynamic];
+        await upsertGeneratedNotifications(generatedNotifications);
+        const saved = await pool.query(`
+      select id, created_at as ts, type, severity, title, body, read_at is not null as read,
+             'in_app' as channel, status, entity, entity_id as "entityId"
+      from notifications
+      where user_id is null or user_id = $1
+      order by created_at desc
+      limit 100
+    `, [actorId(request)]);
+        return saved.rows;
     });
     app.post("/notifications/:id/read", async (request) => {
         const rawId = request.params.id ?? "";

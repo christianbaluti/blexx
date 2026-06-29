@@ -286,11 +286,14 @@ export interface NotificationItem {
   id: Id;
   ts: string;
   type: "low_stock" | "expiry" | "info" | "system";
+  severity?: "info" | "warning" | "critical";
   title: string;
   body: string | null;
   read: boolean;
   channel?: "in_app" | "email" | "sms" | "push";
   status?: "pending" | "sent" | "failed";
+  entity?: string | null;
+  entityId?: Id | null;
 }
 
 export interface AppSettings {
